@@ -51,7 +51,6 @@ export type FluentMessageId =
   | 'pref-engine-mineru-vlm'
   | 'pref-engine-paddleocrvl16'
   | 'pref-engine-ppocrv6'
-  | 'pref-engine-ppocrv5'
   | 'pref-engine-ppstructurev3'
   | 'pref-general-title'
   | 'pref-help'

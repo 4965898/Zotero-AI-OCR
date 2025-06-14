@@ -17,8 +17,7 @@ import {
 import { getString } from "../utils/locale";
 
 const ALL_ENGINES: { value: string; label: string }[] = [
-  { value: "PP-OCRv6", label: "PP-OCRv6 (基础文字识别-最新)" },
-  { value: "PP-OCRv5", label: "PP-OCRv5 (基础文字识别-旧版)" },
+  { value: "PP-OCRv6", label: "PP-OCRv6 (基础文字识别)" },
   { value: "PP-StructureV3", label: "PP-StructureV3 (文档结构解析)" },
   { value: "PaddleOCR-VL-1.6", label: "PaddleOCR-VL-1.6 (增强视觉语言模型)" },
   { value: "MinerU-pipeline", label: "MinerU-pipeline (文档解析)" },
