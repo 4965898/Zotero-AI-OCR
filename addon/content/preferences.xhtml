@@ -1,0 +1,199 @@
+<linkset>
+  <html:link rel="localization" href="__addonRef__-preferences.ftl" />
+</linkset>
+<hbox id="aiocr-prefs-engine-bar" align="center" style="margin-bottom: 10px; padding: 8px; background-color: #f5f5f5; border-radius: 4px;">
+  <label data-l10n-id="pref-engine" control="aiocr-engine" style="font-weight: bold;" />
+  <menulist id="aiocr-engine" flex="1" style="min-width: 200px;">
+    <menupopup>
+      <menuitem value="PP-OCRv5" label="PP-OCRv5 (基础文字识别)" />
+      <menuitem value="PP-StructureV3" label="PP-StructureV3 (文档结构解析)" />
+      <menuitem value="PaddleOCR-VL" label="PaddleOCR-VL (视觉语言模型)" />
+      <menuitem value="PaddleOCR-VL-1.5" label="PaddleOCR-VL-1.5 (增强视觉语言模型)" />
+      <menuseparator />
+      <menuitem value="MinerU-pipeline" label="MinerU-pipeline (文档解析)" />
+      <menuitem value="MinerU-vlm" label="MinerU-vlm (推荐文档解析)" />
+      <menuitem value="MinerU-HTML" label="MinerU-HTML (HTML解析)" />
+    </menupopup>
+  </menulist>
+  <label value="  " />
+  <label id="aiocr-api-mode-label" data-l10n-id="pref-api-mode" control="aiocr-api-mode" style="font-weight: bold; margin-left: 20px;" />
+  <menulist id="aiocr-api-mode" flex="1" style="min-width: 150px;">
+    <menupopup>
+      <menuitem value="sync" label="同步 API" />
+      <menuitem value="async" label="异步 API" />
+    </menupopup>
+  </menulist>
+</hbox>
+<tabbox
+  onload="Zotero.__addonInstance__.hooks.onPrefsEvent('load', { window })"
+  id="aiocr-prefs-tabbox"
+>
+  <tabs id="aiocr-prefs-tabs">
+    <tab label="通用设置" id="aiocr-tab-general" />
+    <tab label="API 端点管理" id="aiocr-tab-endpoints" />
+    <tab label="高级识别功能" id="aiocr-tab-advanced" />
+  </tabs>
+  <tabpanels>
+    <tabpanel>
+      <groupbox>
+        <label><html:h2 data-l10n-id="pref-general-title"></html:h2></label>
+        <hbox align="center">
+          <label data-l10n-id="pref-note-naming" control="aiocr-note-naming" style="min-width: 120px;" />
+          <menulist
+            id="aiocr-note-naming"
+            flex="1"
+          >
+            <menupopup>
+              <menuitem
+                value="default"
+                label="默认 (OCR Result - 引擎名)"
+              />
+              <menuitem
+                value="zotero"
+                label="Zotero 命名规则"
+              />
+              <menuitem
+                value="custom"
+                label="自定义"
+              />
+            </menupopup>
+          </menulist>
+        </hbox>
+        <hbox align="center" id="aiocr-custom-naming-row" hidden="true" style="margin-top: 4px;">
+          <label value="自定义模板:" style="min-width: 120px;" />
+          <html:input
+            type="text"
+            id="aiocr-custom-naming-template"
+            flex="1"
+            placeholder="{{ firstCreator suffix=' - ' }}{{ year suffix=' - ' }}OCR Result"
+          />
+        </hbox>
+        <description style="color: #666; font-size: 11px; margin-top: 2px; margin-left: 124px;">
+          支持变量: {{ firstCreator }}, {{ year }}, {{ title }}, {{ itemType }}, {{ attachmentTitle }} 等，使用 suffix=' - ' 添加分隔符
+        </description>
+        <checkbox
+          id="aiocr-auto-ocr"
+          data-l10n-id="pref-auto-ocr"
+          style="margin-top: 10px;"
+        />
+        <hbox align="center" style="margin-top: 8px;">
+          <label data-l10n-id="pref-concurrency" control="aiocr-concurrency" style="min-width: 120px;" />
+          <html:input
+            type="number"
+            id="aiocr-concurrency"
+            min="1"
+            max="10"
+            style="width: 60px"
+          />
+        </hbox>
+      </groupbox>
+    </tabpanel>
+    <tabpanel>
+      <groupbox>
+        <label><html:h2 data-l10n-id="pref-endpoints-title"></html:h2></label>
+        <description style="color: #666; font-size: 12px; margin-bottom: 8px;">
+          管理当前引擎的 API 端点。MinerU 引擎的默认 URL 为 https://mineru.net，Token 为官网申请的 Bearer Token。
+        </description>
+        <html:div
+          id="aiocr-endpoints-container"
+          style="
+            min-height: 200px;
+            border: 1px solid #ccc;
+            padding: 8px;
+            overflow-y: auto;
+            max-height: 300px;
+            border-radius: 4px;
+          "
+        />
+        <hbox pack="center" style="margin-top: 8px;">
+          <button
+            id="aiocr-endpoint-add"
+            data-l10n-id="pref-endpoints-add"
+            style="min-width: 70px; text-align: center;"
+          />
+          <button
+            id="aiocr-endpoint-edit"
+            data-l10n-id="pref-endpoints-edit"
+            style="min-width: 70px; text-align: center;"
+          />
+          <button
+            id="aiocr-endpoint-delete"
+            data-l10n-id="pref-endpoints-delete"
+            style="min-width: 70px; text-align: center;"
+          />
+          <button
+            id="aiocr-endpoint-set-active"
+            data-l10n-id="pref-endpoints-set-active"
+            style="min-width: 80px; text-align: center;"
+          />
+          <button
+            id="aiocr-endpoint-test"
+            data-l10n-id="pref-endpoints-test"
+            style="min-width: 80px; text-align: center;"
+          />
+        </hbox>
+        <groupbox id="aiocr-endpoint-form" hidden="true">
+          <hbox align="center">
+            <label
+              data-l10n-id="pref-endpoints-name"
+              control="aiocr-endpoint-name"
+              style="min-width: 80px;"
+            />
+            <html:input type="text" id="aiocr-endpoint-name" flex="1" />
+          </hbox>
+          <hbox align="center">
+            <label
+              data-l10n-id="pref-endpoints-url"
+              control="aiocr-endpoint-url"
+              style="min-width: 80px;"
+            />
+            <html:input
+              type="text"
+              id="aiocr-endpoint-url"
+              flex="1"
+              placeholder="PaddleOCR: https://paddleocr.aistudio-app.com  MinerU: https://mineru.net"
+            />
+          </hbox>
+          <hbox align="center">
+            <label
+              data-l10n-id="pref-endpoints-token"
+              control="aiocr-endpoint-token"
+              style="min-width: 80px;"
+            />
+            <html:input
+              type="password"
+              id="aiocr-endpoint-token"
+              flex="1"
+            />
+          </hbox>
+          <hbox pack="center" style="margin-top: 8px;">
+            <button id="aiocr-endpoint-save" label="OK" style="min-width: 70px;" />
+            <button id="aiocr-endpoint-cancel" label="Cancel" style="min-width: 70px;" />
+          </hbox>
+        </groupbox>
+      </groupbox>
+    </tabpanel>
+    <tabpanel>
+      <groupbox>
+        <label><html:h2 data-l10n-id="pref-advanced-title"></html:h2></label>
+        <description data-l10n-id="pref-advanced-description" />
+        <html:div id="aiocr-advanced-features-container" />
+      </groupbox>
+    </tabpanel>
+  </tabpanels>
+</tabbox>
+<vbox>
+  <html:label
+    data-l10n-id="pref-help"
+    data-l10n-args='{"time": "__buildTime__","name": "__addonName__","version":"__buildVersion__"}'
+  ></html:label>
+  <hbox align="center" style="margin-top: 4px;">
+    <label value="Developed by Daxoel" style="color: #666; font-size: 12px;" />
+    <label value=" | " style="color: #999; font-size: 12px;" />
+    <label
+      value="GitHub"
+      style="color: #1976d2; font-size: 12px; text-decoration: underline; cursor: pointer;"
+      onclick="Zotero.launchURLWithDialog('https://github.com/4965898/Zotero-AI-OCR')"
+    />
+  </hbox>
+</vbox>

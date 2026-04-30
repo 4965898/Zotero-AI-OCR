@@ -1,0 +1,54 @@
+.aiocr-menu-icon {
+  list-style-image: url("chrome://aiocr/content/icons/favicon@0.5x.png");
+}
+
+#aiocr-prefs-tabs tab {
+  padding: 6px 16px;
+  margin: 0 4px;
+  font-weight: bold;
+  border-radius: 4px 4px 0 0;
+}
+
+#aiocr-prefs-tabs tab[selected="true"] {
+  background-color: #1976d2;
+  color: white;
+}
+
+.aiocr-endpoint-item {
+  padding: 6px 8px;
+  border-bottom: 1px solid #e0e0e0;
+  cursor: pointer;
+}
+
+.aiocr-endpoint-item:hover {
+  background-color: #f0f0f0;
+}
+
+.aiocr-endpoint-item.active {
+  background-color: #e3f2fd;
+  border-left: 3px solid #1976d2;
+}
+
+.aiocr-endpoint-item.selected {
+  background-color: #e8f5e9;
+}
+
+.aiocr-endpoint-name {
+  font-weight: bold;
+  font-size: 13px;
+}
+
+.aiocr-endpoint-url {
+  color: #666;
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.aiocr-endpoint-status {
+  font-size: 11px;
+  color: #4caf50;
+}
+
+.aiocr-advanced-checkbox {
+  margin: 4px 0;
+}
