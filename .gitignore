@@ -1,0 +1,23 @@
+# dot files
+.DS_Store
+
+# Node.js
+node_modules
+pnpm-lock.yaml
+yarn.lock
+
+# TSC
+tsconfig.tsbuildinfo
+
+# Scaffold
+.env
+.scaffold
+build
+logs
+
+# Debug / temp
+debug.log
+日志.txt
+*.log
+优化Zotero OCR插件功能.md
+张月萍_2019_*.md
