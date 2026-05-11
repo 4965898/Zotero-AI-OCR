@@ -264,6 +264,14 @@ npm run lint:fix
 
 [AGPL-3.0-or-later](LICENSE)
 
+## 赞助
+
+如果你觉得本插件不错，可以请我喝杯咖啡 ☕
+
+<p align="center">
+  <img src="doc/images/alipay.jpg" alt="支付宝" width="200">
+</p>
+
 ---
 
 <p align="center">
