@@ -21,3 +21,5 @@ debug.log
 *.log
 优化Zotero OCR插件功能.md
 张月萍_2019_*.md
+ai_ocr.py
+ai_ocr_config.py
