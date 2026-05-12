@@ -138,6 +138,15 @@ const OCR_PROMPT =
 const PDF_PAGE_PROMPT =
   "Please perform OCR on this document page image. Extract all text content exactly as it appears, preserving the original layout and structure. Output the result in Markdown format. For tables, use Markdown table syntax. For formulas, use LaTeX notation. Do not add any commentary, only output the recognized content.";
 
+function getEffectivePrompt(defaultPrompt: string): string {
+  try {
+    const custom = (getPref("aiCustomPrompt" as any) as string) || "";
+    return custom.trim() || defaultPrompt;
+  } catch {
+    return defaultPrompt;
+  }
+}
+
 const MAX_AI_PDF_PAGES = 50;
 
 export const ENGINE_MODELS = {
@@ -564,7 +573,7 @@ function extractTextFromPrunedResult(prunedResult: any): string {
   return JSON.stringify(prunedResult, null, 2);
 }
 
-async function callSyncAPI(
+export async function callSyncAPI(
   engine: EngineType,
   filePath: string,
   isPdf: boolean,
@@ -1213,10 +1222,11 @@ async function loadPdfJsDirect(): Promise<any> {
   return null;
 }
 
-async function pdfToImages(
+export async function pdfToImages(
   filePath: string,
   onProgress?: (current: number, total: number) => void,
   itemId?: number,
+  pageNumbers?: number[],
 ): Promise<{ base64: string; pageNumber: number }[]> {
   let openedReader: any = null;
   let shouldCloseReader = false;
@@ -1228,7 +1238,12 @@ async function pdfToImages(
         ztoolkit.log(
           "[AIOCR] pdfToImages: trying chrome compartment rendering...",
         );
-        const images = await renderPdfChrome(pdfjsLib, filePath, onProgress);
+        const images = await renderPdfChrome(
+          pdfjsLib,
+          filePath,
+          onProgress,
+          pageNumbers,
+        );
         ztoolkit.log(
           `[AIOCR] pdfToImages: chrome compartment rendering succeeded, ${images.length} pages`,
         );
@@ -1341,6 +1356,7 @@ async function pdfToImages(
         iframeWindow,
         filePath,
         onProgress,
+        pageNumbers,
       );
       ztoolkit.log(
         `[AIOCR] pdfToImages: cross-compartment rendering succeeded, ${images.length} pages`,
@@ -1358,7 +1374,12 @@ async function pdfToImages(
       );
     }
 
-    return await renderPdfIframeSandbox(iframeWindow, filePath, onProgress);
+    return await renderPdfIframeSandbox(
+      iframeWindow,
+      filePath,
+      onProgress,
+      pageNumbers,
+    );
   } finally {
     if (shouldCloseReader && openedReader) {
       try {
@@ -1375,6 +1396,7 @@ async function renderPdfChrome(
   pdfjsLib: any,
   filePath: string,
   onProgress?: (current: number, total: number) => void,
+  pageNumbers?: number[],
 ): Promise<{ base64: string; pageNumber: number }[]> {
   if (pdfjsLib.GlobalWorkerOptions && !pdfjsLib.GlobalWorkerOptions.workerSrc) {
     pdfjsLib.GlobalWorkerOptions.workerSrc =
@@ -1391,12 +1413,18 @@ async function renderPdfChrome(
   );
 
   const doc = await pdfjsLib.getDocument(bytes).promise;
-  const totalPages = Math.min(doc.numPages, MAX_AI_PDF_PAGES);
+  const pagesToRender =
+    pageNumbers && pageNumbers.length > 0
+      ? pageNumbers.filter((p) => p >= 1 && p <= doc.numPages)
+      : Array.from(
+          { length: Math.min(doc.numPages, MAX_AI_PDF_PAGES) },
+          (_, i) => i + 1,
+        );
   ztoolkit.log(
-    `[AIOCR] renderPdfChrome: doc.numPages=${doc.numPages}, rendering ${totalPages} pages`,
+    `[AIOCR] renderPdfChrome: doc.numPages=${doc.numPages}, rendering ${pagesToRender.length} pages`,
   );
 
-  if (totalPages <= 0) {
+  if (pagesToRender.length === 0) {
     throw new Error(`PDF has no pages (numPages=${doc.numPages})`);
   }
 
@@ -1404,8 +1432,9 @@ async function renderPdfChrome(
   if (!win) throw new Error("Cannot get main window for canvas rendering");
 
   const images: { base64: string; pageNumber: number }[] = [];
-  for (let i = 1; i <= totalPages; i++) {
-    const page = await doc.getPage(i);
+  for (let idx = 0; idx < pagesToRender.length; idx++) {
+    const pageNum = pagesToRender[idx];
+    const page = await doc.getPage(pageNum);
     const viewport = page.getViewport({ scale: 2 });
 
     if (
@@ -1415,7 +1444,7 @@ async function renderPdfChrome(
       isNaN(viewport.height)
     ) {
       throw new Error(
-        `Page ${i} viewport is invalid (${viewport.width}x${viewport.height})`,
+        `Page ${pageNum} viewport is invalid (${viewport.width}x${viewport.height})`,
       );
     }
 
@@ -1431,12 +1460,12 @@ async function renderPdfChrome(
 
     const dataUrl = canvas.toDataURL("image/png");
     const base64 = dataUrl.split(",")[1];
-    images.push({ base64, pageNumber: i });
+    images.push({ base64, pageNumber: pageNum });
 
     ztoolkit.log(
-      `[AIOCR] renderPdfChrome: page ${i}/${totalPages} rendered, base64 length=${base64.length}`,
+      `[AIOCR] renderPdfChrome: page ${pageNum} (${idx + 1}/${pagesToRender.length}) rendered, base64 length=${base64.length}`,
     );
-    if (onProgress) onProgress(i, totalPages);
+    if (onProgress) onProgress(idx + 1, pagesToRender.length);
   }
 
   return images;
@@ -1447,6 +1476,7 @@ async function renderPdfCrossCompartment(
   iframeWindow: any,
   filePath: string,
   onProgress?: (current: number, total: number) => void,
+  pageNumbers?: number[],
 ): Promise<{ base64: string; pageNumber: number }[]> {
   const Cu = (Components as any).utils;
   const waivedLib = Cu.waiveXrays(pdfjsLib);
@@ -1511,12 +1541,18 @@ async function renderPdfCrossCompartment(
   }
 
   const waivedDoc = Cu.waiveXrays(doc);
-  const totalPages = Math.min(waivedDoc.numPages, MAX_AI_PDF_PAGES);
+  const pagesToRender =
+    pageNumbers && pageNumbers.length > 0
+      ? pageNumbers.filter((p) => p >= 1 && p <= waivedDoc.numPages)
+      : Array.from(
+          { length: Math.min(waivedDoc.numPages, MAX_AI_PDF_PAGES) },
+          (_, i) => i + 1,
+        );
   ztoolkit.log(
-    `[AIOCR] renderPdfCrossCompartment: doc.numPages=${waivedDoc.numPages}, rendering ${totalPages} pages`,
+    `[AIOCR] renderPdfCrossCompartment: doc.numPages=${waivedDoc.numPages}, rendering ${pagesToRender.length} pages`,
   );
 
-  if (totalPages <= 0) {
+  if (pagesToRender.length === 0) {
     throw new Error(`PDF has no pages (numPages=${waivedDoc.numPages})`);
   }
 
@@ -1525,8 +1561,9 @@ async function renderPdfCrossCompartment(
   }
 
   const images: { base64: string; pageNumber: number }[] = [];
-  for (let i = 1; i <= totalPages; i++) {
-    const page = await waivedDoc.getPage(i);
+  for (let idx = 0; idx < pagesToRender.length; idx++) {
+    const pageNum = pagesToRender[idx];
+    const page = await waivedDoc.getPage(pageNum);
     const waivedPage = Cu.waiveXrays(page);
 
     const vpOpts = new iframeWindow.Object();
@@ -1536,11 +1573,13 @@ async function renderPdfCrossCompartment(
     const vpWidth = waivedViewport.width;
     const vpHeight = waivedViewport.height;
     ztoolkit.log(
-      `[AIOCR] renderPdfCrossCompartment: page ${i} viewport: ${vpWidth}x${vpHeight}`,
+      `[AIOCR] renderPdfCrossCompartment: page ${pageNum} viewport: ${vpWidth}x${vpHeight}`,
     );
 
     if (!vpWidth || !vpHeight || isNaN(vpWidth) || isNaN(vpHeight)) {
-      throw new Error(`Page ${i} viewport is invalid (${vpWidth}x${vpHeight})`);
+      throw new Error(
+        `Page ${pageNum} viewport is invalid (${vpWidth}x${vpHeight})`,
+      );
     }
 
     const iframeCanvas = iframeWindow.document.createElement("canvas");
@@ -1556,12 +1595,12 @@ async function renderPdfCrossCompartment(
 
     const dataUrl = iframeCanvas.toDataURL("image/png");
     const base64 = dataUrl.split(",")[1];
-    images.push({ base64, pageNumber: i });
+    images.push({ base64, pageNumber: pageNum });
 
     ztoolkit.log(
-      `[AIOCR] renderPdfCrossCompartment: page ${i}/${totalPages} rendered with iframe canvas, base64 length=${base64.length}`,
+      `[AIOCR] renderPdfCrossCompartment: page ${pageNum} (${idx + 1}/${pagesToRender.length}) rendered with iframe canvas, base64 length=${base64.length}`,
     );
-    if (onProgress) onProgress(i, totalPages);
+    if (onProgress) onProgress(idx + 1, pagesToRender.length);
   }
 
   return images;
@@ -1571,6 +1610,7 @@ async function renderPdfIframeSandbox(
   iframeWindow: any,
   filePath: string,
   onProgress?: (current: number, total: number) => void,
+  pageNumbers?: number[],
 ): Promise<{ base64: string; pageNumber: number }[]> {
   const pdfBytes = await IOUtils.read(filePath);
   const pdfBase64 = uint8ArrayToBase64(new Uint8Array(pdfBytes));
@@ -1613,6 +1653,10 @@ async function renderPdfIframeSandbox(
     sandbox.pdfBase64 = pdfBase64;
     sandbox.maxPages = MAX_AI_PDF_PAGES;
     sandbox.renderScale = 2;
+    sandbox.pageNumbersJson =
+      pageNumbers && pageNumbers.length > 0
+        ? JSON.stringify(pageNumbers)
+        : null;
     sandbox.onComplete = Cu.exportFunction(callback, sandbox);
 
     const renderCode = [
@@ -1632,14 +1676,17 @@ async function renderPdfIframeSandbox(
       "      bytes[i] = binaryString.charCodeAt(i);",
       "    }",
       "    var doc = await pdfjsLib.getDocument(bytes).promise;",
-      "    var numPages = Math.min(doc.numPages, maxPages);",
+      "    var pagesToRender = pageNumbersJson ? JSON.parse(pageNumbersJson).filter(function(p) { return p >= 1 && p <= doc.numPages; }) : null;",
+      "    var numPages = pagesToRender ? pagesToRender.length : Math.min(doc.numPages, maxPages);",
       "    if (numPages <= 0) {",
       "      onComplete(null, 'PDF has no pages: ' + doc.numPages);",
       "      return;",
       "    }",
       "    var results = [];",
-      "    for (var i = 1; i <= numPages; i++) {",
-      "      var page = await doc.getPage(i);",
+      "    var pageNumbers = [];",
+      "    for (var idx = 0; idx < numPages; idx++) {",
+      "      var pageNum = pagesToRender ? pagesToRender[idx] : (idx + 1);",
+      "      var page = await doc.getPage(pageNum);",
       "      var viewport = page.getViewport({ scale: renderScale });",
       "      var canvas = document.createElement('canvas');",
       "      canvas.width = viewport.width;",
@@ -1648,8 +1695,9 @@ async function renderPdfIframeSandbox(
       "      await page.render({ canvasContext: ctx, viewport: viewport }).promise;",
       "      var dataUrl = canvas.toDataURL('image/png');",
       "      results.push(dataUrl.split(',')[1]);",
+      "      pageNumbers.push(pageNum);",
       "    }",
-      "    onComplete(JSON.stringify(results), null);",
+      "    onComplete(JSON.stringify({images: results, pageNumbers: pageNumbers}), null);",
       "  } catch (e) {",
       "    onComplete(null, e.message || String(e));",
       "  }",
@@ -1672,6 +1720,10 @@ async function renderPdfIframeSandbox(
     waivedWin._aiocr_pdfBase64 = pdfBase64;
     waivedWin._aiocr_maxPages = MAX_AI_PDF_PAGES;
     waivedWin._aiocr_renderScale = 2;
+    waivedWin._aiocr_pageNumbersJson =
+      pageNumbers && pageNumbers.length > 0
+        ? JSON.stringify(pageNumbers)
+        : null;
 
     const injectCode = [
       "(async function() {",
@@ -1687,14 +1739,17 @@ async function renderPdfIframeSandbox(
       "      bytes[i] = binaryString.charCodeAt(i);",
       "    }",
       "    var doc = await pdfjsLib.getDocument(bytes).promise;",
-      "    var numPages = Math.min(doc.numPages, window._aiocr_maxPages);",
+      "    var pagesToRender = window._aiocr_pageNumbersJson ? JSON.parse(window._aiocr_pageNumbersJson).filter(function(p) { return p >= 1 && p <= doc.numPages; }) : null;",
+      "    var numPages = pagesToRender ? pagesToRender.length : Math.min(doc.numPages, window._aiocr_maxPages);",
       "    if (numPages <= 0) {",
       "      window._aiocr_onComplete(null, 'PDF has no pages: ' + doc.numPages);",
       "      return;",
       "    }",
       "    var results = [];",
-      "    for (var i = 1; i <= numPages; i++) {",
-      "      var page = await doc.getPage(i);",
+      "    var pageNumbers = [];",
+      "    for (var idx = 0; idx < numPages; idx++) {",
+      "      var pageNum = pagesToRender ? pagesToRender[idx] : (idx + 1);",
+      "      var page = await doc.getPage(pageNum);",
       "      var viewport = page.getViewport({ scale: window._aiocr_renderScale });",
       "      var canvas = document.createElement('canvas');",
       "      canvas.width = viewport.width;",
@@ -1703,8 +1758,9 @@ async function renderPdfIframeSandbox(
       "      await page.render({ canvasContext: ctx, viewport: viewport }).promise;",
       "      var dataUrl = canvas.toDataURL('image/png');",
       "      results.push(dataUrl.split(',')[1]);",
+      "      pageNumbers.push(pageNum);",
       "    }",
-      "    window._aiocr_onComplete(JSON.stringify(results), null);",
+      "    window._aiocr_onComplete(JSON.stringify({images: results, pageNumbers: pageNumbers}), null);",
       "  } catch (e) {",
       "    window._aiocr_onComplete(null, e.message || String(e));",
       "  } finally {",
@@ -1712,6 +1768,7 @@ async function renderPdfIframeSandbox(
       "    delete window._aiocr_pdfBase64;",
       "    delete window._aiocr_maxPages;",
       "    delete window._aiocr_renderScale;",
+      "    delete window._aiocr_pageNumbersJson;",
       "  }",
       "})();",
     ].join("\n");
@@ -1738,7 +1795,14 @@ async function renderPdfIframeSandbox(
     `[AIOCR] renderPdfIframeSandbox: render complete, result length=${resultJson?.length ?? "null"}`,
   );
 
-  const base64List = JSON.parse(resultJson);
+  const parsed = JSON.parse(resultJson);
+  if (parsed.images && parsed.pageNumbers) {
+    return parsed.images.map((base64: string, i: number) => ({
+      base64,
+      pageNumber: parsed.pageNumbers[i],
+    }));
+  }
+  const base64List = parsed;
   return base64List.map((base64: string, i: number) => ({
     base64,
     pageNumber: i + 1,
@@ -1914,7 +1978,7 @@ async function callCustomVisionAPI(
         customEngine,
         img.base64,
         "image/png",
-        PDF_PAGE_PROMPT,
+        getEffectivePrompt(PDF_PAGE_PROMPT),
       );
       results.push({
         pageNumber: img.pageNumber,
@@ -1932,7 +1996,7 @@ async function callCustomVisionAPI(
     customEngine,
     fileBase64,
     "image/png",
-    OCR_PROMPT,
+    getEffectivePrompt(OCR_PROMPT),
   );
   if (onProgress) onProgress(1, 1);
   return [{ pageNumber: 1, markdown, plainText: markdown, blocks: [] }];
@@ -2063,7 +2127,7 @@ async function callAIVisionAPI(
         apiBase,
         img.base64,
         "image/png",
-        PDF_PAGE_PROMPT,
+        getEffectivePrompt(PDF_PAGE_PROMPT),
       );
       results.push({
         pageNumber: img.pageNumber,
@@ -2095,7 +2159,7 @@ async function callAIVisionAPI(
     apiBase,
     fileBase64,
     mimeType,
-    OCR_PROMPT,
+    getEffectivePrompt(OCR_PROMPT),
   );
   if (onProgress) onProgress(1, 1);
   return [

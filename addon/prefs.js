@@ -11,3 +11,4 @@ pref("extensions.zotero.aiocr.endpoints", "{}");
 pref("extensions.zotero.aiocr.advancedFeatures", "{}");
 pref("extensions.zotero.aiocr.aiProviderConfigs", "{}");
 pref("extensions.zotero.aiocr.customEngines", "[]");
+pref("extensions.zotero.aiocr.aiCustomPrompt", "");

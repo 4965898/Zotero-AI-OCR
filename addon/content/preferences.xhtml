@@ -278,6 +278,16 @@
             placeholder="留空使用默认地址"
           />
         </hbox>
+        <vbox style="margin-bottom: 6px">
+          <label value="自定义提示词:" style="min-width: 100px" />
+          <html:textarea
+            id="aiocr-ai-custom-prompt"
+            rows="3"
+            flex="1"
+            placeholder="留空使用默认提示词。可自定义 OCR 识别指令，如指定输出格式、语言等"
+            style="resize: vertical; font-size: 12px"
+          />
+        </vbox>
         <hbox pack="end" style="margin-top: 8px">
           <button
             id="aiocr-ai-provider-save"

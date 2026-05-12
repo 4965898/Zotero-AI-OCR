@@ -1,5 +1,7 @@
 import {
   performOCR,
+  pdfToImages,
+  callSyncAPI,
   ENGINE_ADVANCED_FEATURES,
   ENGINE_MODELS,
   EngineType,
@@ -61,6 +63,14 @@ export function registerContextMenu(win: _ZoteroTypes.MainWindow) {
     label: getString("menuitem-batch-ocr"),
     icon: menuIcon,
     commandListener: () => handleBatchOCR(),
+  });
+
+  ztoolkit.Menu.register("item", {
+    tag: "menuitem",
+    id: "zotero-itemmenu-aiocr-page-range",
+    label: getString("menuitem-page-range-ocr"),
+    icon: menuIcon,
+    commandListener: () => handlePageRangeOCR(),
   });
 
   ztoolkit.Menu.register("item", {
@@ -664,6 +674,252 @@ async function handleBatchOCR() {
     progress: 100,
   });
   progressWin.startCloseTimer(5000);
+}
+
+function parsePageRange(input: string, maxPage: number): number[] {
+  const pages = new Set<number>();
+  const parts = input.split(",");
+
+  for (const part of parts) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+
+    const rangeMatch = trimmed.match(/^(\d+)\s*-\s*(\d+)$/);
+    if (rangeMatch) {
+      const start = parseInt(rangeMatch[1], 10);
+      const end = parseInt(rangeMatch[2], 10);
+      if (start > 0 && end > 0 && start <= end) {
+        for (let i = start; i <= Math.min(end, maxPage); i++) {
+          pages.add(i);
+        }
+      }
+      continue;
+    }
+
+    const singleMatch = trimmed.match(/^(\d+)$/);
+    if (singleMatch) {
+      const pageNum = parseInt(singleMatch[1], 10);
+      if (pageNum > 0 && pageNum <= maxPage) {
+        pages.add(pageNum);
+      }
+    }
+  }
+
+  return Array.from(pages).sort((a, b) => a - b);
+}
+
+async function handlePageRangeOCR() {
+  const attachments = getSelectedPdfAttachments();
+  if (attachments.length === 0) {
+    new ztoolkit.ProgressWindow(addon.data.config.addonName)
+      .createLine({
+        text: getString("progress-page-range-no-pdf"),
+        type: "fail",
+        progress: 100,
+      })
+      .show();
+    return;
+  }
+
+  const engine = (getPref("engine") as string) || "PP-OCRv5";
+  const modelConfig = ENGINE_MODELS[engine as EngineType];
+  const isMinerU = modelConfig && (modelConfig as any).platform === "mineru";
+
+  if (isMinerU) {
+    new ztoolkit.ProgressWindow(addon.data.config.addonName)
+      .createLine({
+        text: getString("progress-page-range-mineru-unsupported"),
+        type: "fail",
+        progress: 100,
+      })
+      .show();
+    return;
+  }
+
+  const attachment = attachments[0];
+  const filePath = await attachment.getFilePathAsync();
+  if (!filePath) {
+    new ztoolkit.ProgressWindow(addon.data.config.addonName)
+      .createLine({
+        text: getString("progress-page-range-no-pdf"),
+        type: "fail",
+        progress: 100,
+      })
+      .show();
+    return;
+  }
+
+  const pageCount = await getPdfPageCount(filePath);
+  const promptMsg =
+    pageCount > 0
+      ? `该 PDF 共 ${pageCount} 页，请输入要识别的页码范围（如: 1-5, 8, 10-12）：`
+      : "请输入要识别的页码范围（如: 1-5, 8, 10-12）：";
+
+  const input = { value: "" };
+  const ok = Services.prompt.prompt(
+    null,
+    getString("menuitem-page-range-ocr"),
+    promptMsg,
+    input,
+    null,
+    {},
+  );
+
+  if (!ok || !input.value.trim()) return;
+
+  const maxPage = pageCount > 0 ? pageCount : 9999;
+  const pageNumbers = parsePageRange(input.value.trim(), maxPage);
+
+  if (pageNumbers.length === 0) {
+    new ztoolkit.ProgressWindow(addon.data.config.addonName)
+      .createLine({
+        text: getString("progress-page-range-invalid"),
+        type: "fail",
+        progress: 100,
+      })
+      .show();
+    return;
+  }
+
+  await processPageRangeOCR(attachment, pageNumbers);
+}
+
+async function processPageRangeOCR(
+  attachment: Zotero.Item,
+  pageNumbers: number[],
+): Promise<void> {
+  const progressWin = new ztoolkit.ProgressWindow(addon.data.config.addonName, {
+    closeOnClick: true,
+    closeTime: -1,
+  })
+    .createLine({
+      text: getString("progress-page-range-start"),
+      type: "default",
+      progress: 0,
+    })
+    .show();
+
+  try {
+    const filePath = await attachment.getFilePathAsync();
+    if (!filePath) throw new Error("Cannot get file path");
+
+    const engine = (getPref("engine") as string) || "PP-OCRv5";
+    const modelConfig = ENGINE_MODELS[engine as EngineType];
+    const isPaddleOCR =
+      modelConfig && (modelConfig as any).platform === "paddleocr";
+
+    const images = await pdfToImages(
+      filePath,
+      undefined,
+      attachment.id,
+      pageNumbers,
+    );
+
+    if (images.length === 0) {
+      throw new Error("No pages rendered");
+    }
+
+    const allMarkdownParts: string[] = [];
+    const totalImages = images.length;
+
+    for (let i = 0; i < totalImages; i++) {
+      const img = images[i];
+
+      progressWin.changeLine({
+        text: getString("progress-page-range-page", {
+          args: {
+            current: String(i + 1),
+            total: String(totalImages),
+          },
+        }),
+        progress: Math.round(((i + 1) / totalImages) * 100),
+      });
+
+      const tempDir = PathUtils.join(PathUtils.tempDir, "aiocr-pagerange");
+      await IOUtils.makeDirectory(tempDir, { ignoreExisting: true });
+      const tempPath = PathUtils.join(
+        tempDir,
+        `page-${img.pageNumber}-${Date.now()}.png`,
+      );
+
+      try {
+        const binaryString = atob(img.base64);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let j = 0; j < binaryString.length; j++) {
+          bytes[j] = binaryString.charCodeAt(j);
+        }
+        await IOUtils.write(tempPath, bytes);
+
+        let pageMarkdown = "";
+
+        if (isPaddleOCR) {
+          const pages = await callSyncAPI(
+            engine as EngineType,
+            tempPath,
+            false,
+          );
+          pageMarkdown = pages.map((p) => p.markdown).join("\n");
+        } else {
+          const result = await performOCR(
+            tempPath,
+            false,
+            undefined,
+            undefined,
+            attachment.id,
+          );
+          if (result.pages.length > 0) {
+            pageMarkdown = result.pages.map((p) => p.markdown).join("\n");
+          } else {
+            pageMarkdown = result.fullMarkdown;
+          }
+        }
+
+        allMarkdownParts.push(`## Page ${img.pageNumber}\n\n${pageMarkdown}`);
+      } finally {
+        try {
+          await IOUtils.remove(tempPath, { ignoreAbsent: true });
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+
+    const fullMarkdown = allMarkdownParts.join("\n\n---\n\n");
+
+    const parentItem = Zotero.Items.get(
+      attachment.parentItemID || attachment.id,
+    );
+    const pageRangeStr = pageNumbers.join(", ");
+    const noteTitle = generateNoteTitle(
+      attachment,
+      `${engine} (Pages ${pageRangeStr})`,
+    );
+    const noteContent = `<h1>${noteTitle}</h1>\n${markdownToHTML(fullMarkdown)}`;
+
+    const note = new Zotero.Item("note");
+    note.libraryID = attachment.libraryID;
+    note.setNote(noteContent);
+    if (attachment.parentItemID) {
+      note.parentKey = parentItem.key;
+    }
+    await note.saveTx();
+
+    progressWin.changeLine({
+      text: getString("progress-page-range-done"),
+      type: "success",
+      progress: 100,
+    });
+    progressWin.startCloseTimer(3000);
+  } catch (e: any) {
+    progressWin.changeLine({
+      text: getString("progress-page-range-failed", {
+        args: { error: truncateName(e.message || String(e), 60) },
+      }),
+      type: "fail",
+      progress: 100,
+    });
+    progressWin.startCloseTimer(5000);
+  }
 }
 
 export async function processOCRForAttachment(

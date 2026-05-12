@@ -224,8 +224,8 @@ function initEndpointsTab(win: Window) {
       text: result.success
         ? getString("progress-test-success")
         : getString("progress-test-failed", {
-          args: { error: result.message },
-        }),
+            args: { error: result.message },
+          }),
       type: result.success ? "success" : "fail",
       progress: 100,
     });
@@ -608,8 +608,8 @@ function initAIProviderTab(win: Window) {
       text: result.success
         ? getString("progress-test-success")
         : getString("progress-test-failed", {
-          args: { error: result.message },
-        }),
+            args: { error: result.message },
+          }),
       type: result.success ? "success" : "fail",
       progress: 100,
     });
@@ -633,6 +633,9 @@ function updateAIProviderTab(win: Window) {
   const apiBaseInput = d.getElementById(
     "aiocr-ai-api-base",
   ) as HTMLInputElement;
+  const customPromptInput = d.getElementById(
+    "aiocr-ai-custom-prompt",
+  ) as HTMLTextAreaElement;
   const hintEl = d.getElementById("aiocr-ai-provider-hint");
 
   if (!isAI) {
@@ -641,15 +644,18 @@ function updateAIProviderTab(win: Window) {
     if (apiKeyInput) apiKeyInput.value = "";
     if (modelInput) modelInput.value = "";
     if (apiBaseInput) apiBaseInput.value = "";
+    if (customPromptInput) customPromptInput.value = "";
     if (apiKeyInput) apiKeyInput.setAttribute("disabled", "true");
     if (modelInput) modelInput.setAttribute("disabled", "true");
     if (apiBaseInput) apiBaseInput.setAttribute("disabled", "true");
+    if (customPromptInput) customPromptInput.setAttribute("disabled", "true");
     return;
   }
 
   if (apiKeyInput) apiKeyInput.removeAttribute("disabled");
   if (modelInput) modelInput.removeAttribute("disabled");
   if (apiBaseInput) apiBaseInput.removeAttribute("disabled");
+  if (customPromptInput) customPromptInput.removeAttribute("disabled");
 
   const provider = modelConfig.provider;
   const providerConfig = AI_PROVIDER_CONFIGS[provider];
@@ -670,6 +676,14 @@ function updateAIProviderTab(win: Window) {
       modelInput.value = saved.model || providerConfig.defaultModel;
     if (apiBaseInput) apiBaseInput.value = saved.apiBase || "";
 
+    if (customPromptInput) {
+      try {
+        customPromptInput.value = (getPref("aiCustomPrompt") as string) || "";
+      } catch {
+        customPromptInput.value = "";
+      }
+    }
+
     if (hintEl) {
       const supportsPdf = provider === "openai" || provider === "openrouter";
       let hintText = supportsPdf
@@ -684,6 +698,7 @@ function updateAIProviderTab(win: Window) {
     if (apiKeyInput) apiKeyInput.value = "";
     if (modelInput) modelInput.value = providerConfig.defaultModel;
     if (apiBaseInput) apiBaseInput.value = "";
+    if (customPromptInput) customPromptInput.value = "";
   }
 }
 
@@ -699,6 +714,9 @@ function saveAIProviderConfig(win: Window) {
   const apiBaseInput = d.getElementById(
     "aiocr-ai-api-base",
   ) as HTMLInputElement;
+  const customPromptInput = d.getElementById(
+    "aiocr-ai-custom-prompt",
+  ) as HTMLTextAreaElement;
 
   const configs = JSON.parse((getPref("aiProviderConfigs") as string) || "{}");
   configs[provider] = {
@@ -707,6 +725,10 @@ function saveAIProviderConfig(win: Window) {
     apiBase: apiBaseInput?.value || "",
   };
   setPref("aiProviderConfigs", JSON.stringify(configs));
+
+  if (customPromptInput) {
+    setPref("aiCustomPrompt", customPromptInput.value);
+  }
 
   new ztoolkit.ProgressWindow(addon.data.config.addonName, {
     closeOnClick: true,
@@ -781,8 +803,8 @@ function initCustomEnginesTab(win: Window) {
       text: result.success
         ? getString("progress-test-success")
         : getString("progress-test-failed", {
-          args: { error: result.message },
-        }),
+            args: { error: result.message },
+          }),
       type: result.success ? "success" : "fail",
       progress: 100,
     });
