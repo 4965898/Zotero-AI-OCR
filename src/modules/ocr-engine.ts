@@ -42,24 +42,24 @@ export const AI_PROVIDER_CONFIGS: {
   openrouter: {
     name: "OpenRouter",
     apiBase: "https://openrouter.ai/api/v1",
-    defaultModel: "anthropic/claude-3.5-sonnet",
+    defaultModel: "qwen/qwen3-vl-235b-a22b-instruct:free",
     apiFormat: "openai",
   },
   siliconflow: {
     name: "硅基流动",
     apiBase: "https://api.siliconflow.cn/v1",
-    defaultModel: "Qwen/Qwen2.5-VL-32B-Instruct",
+    defaultModel: "Qwen/Qwen3-VL-235B-A22B-Instruct",
     apiFormat: "openai",
     modelHint:
-      "请使用支持视觉的模型（名称中含 VL），如 Qwen/Qwen2.5-VL-32B-Instruct，纯文本模型无法识别图片",
+      "请使用支持视觉的模型（名称中含 VL），如 Qwen/Qwen3-VL-235B-A22B-Instruct，纯文本模型无法识别图片",
   },
   doubao: {
     name: "豆包",
     apiBase: "https://ark.cn-beijing.volces.com/api/v3",
-    defaultModel: "ep-xxxxxxxxxxxx-xxxxx",
+    defaultModel: "doubao-seed-2-0-pro",
     apiFormat: "openai",
     modelHint:
-      "请填入火山引擎方舟平台的接入点ID（如 ep-20250101xxxxx-xxxxx），而非模型名称",
+      "请填入火山引擎方舟平台的接入点ID（如 ep-20250101xxxxx-xxxxx）或模型名称（如 doubao-seed-2-0-pro）",
   },
   zhipu: {
     name: "智谱AI",
@@ -70,19 +70,19 @@ export const AI_PROVIDER_CONFIGS: {
   alibaba: {
     name: "阿里云百炼",
     apiBase: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    defaultModel: "qwen-vl-plus-2025-08-15",
+    defaultModel: "qwen-vl-max",
     apiFormat: "openai",
   },
   ollama: {
     name: "Ollama (本地)",
     apiBase: "http://localhost:11434/api",
-    defaultModel: "llava:latest",
+    defaultModel: "qwen2.5vl:7b",
     apiFormat: "openai",
   },
   groq: {
     name: "Groq",
     apiBase: "https://api.groq.com/openai/v1",
-    defaultModel: "meta-llama/llama-4-scout-17b-16e-instruct",
+    defaultModel: "meta-llama/llama-4-maverick-17b-128e-instruct",
     apiFormat: "openai",
     tokenParam: "max_completion_tokens",
     maxTokens: 5000,
@@ -91,13 +91,13 @@ export const AI_PROVIDER_CONFIGS: {
   infinigence: {
     name: "无问芯穹",
     apiBase: "https://cloud.infini-ai.com/maas/v1",
-    defaultModel: "MiniCPM-V-2.6",
+    defaultModel: "Qwen/Qwen3-VL-235B-A22B-Instruct",
     apiFormat: "openai",
   },
   mistral: {
     name: "Mistral AI",
     apiBase: "https://api.mistral.ai/v1",
-    defaultModel: "pixtral-12b-2409",
+    defaultModel: "mistral-ocr-latest",
     apiFormat: "openai",
     maxTokens: 6000,
     streamParam: false,
@@ -105,7 +105,7 @@ export const AI_PROVIDER_CONFIGS: {
   modelscope: {
     name: "魔搭",
     apiBase: "https://api-inference.modelscope.cn/v1",
-    defaultModel: "Qwen/Qwen-VL-Plus",
+    defaultModel: "Qwen/Qwen3-VL-235B-A22B-Instruct",
     apiFormat: "openai",
   },
   intern: {
