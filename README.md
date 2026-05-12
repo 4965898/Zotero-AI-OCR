@@ -26,6 +26,8 @@
 - 🤖 **多引擎支持** — PaddleOCR + MinerU + 12+ AI 视觉大模型平台
 - 🧠 **AI 视觉模型** — 支持 OpenAI、Gemini、DeepSeek、通义千问、智谱 GLM、Kimi、月之暗面、Groq、Mistral、浦源书生、小米 MiMo、NVIDIA NIM 等平台
 - 🔧 **自定义引擎** — 支持添加任意 OpenAI 兼容或 Gemini 兼容的 API 端点，可保存多个自定义引擎
+- 📄 **识别指定页面** — 支持输入页码范围（如 1-5, 8, 10-12）对 PDF 的指定页面进行 OCR，特别适合大型文档
+- ✏️ **自定义提示词** — 可为 AI 视觉模型设置自定义 OCR 提示词，灵活适配不同识别场景
 - 📝 **Markdown 笔记** — 识别结果自动生成 Zotero 笔记，支持自定义命名模板
 - ⚡ **同步/异步 API** — PaddleOCR 支持同步和异步两种调用模式
 - 🔄 **批量识别** — 支持同时选择多个条目进行批量 OCR
@@ -55,6 +57,15 @@
 1. 选中多个条目
 2. 右键点击，选择 **批量 AI OCR 识别**
 3. 插件将依次处理所有 PDF 附件
+
+### 识别指定页面
+
+1. 选中一个包含 PDF 附件的条目
+2. 右键点击，选择 **识别指定页面**
+3. 在弹出的对话框中输入页码范围（如 `1-5, 8, 10-12`）
+4. 插件将仅识别指定页面，结果合并为一个笔记附加到条目上
+
+> 💡 此功能特别适合超大型 PDF，可只对需要的几页或某个章节进行 OCR。PaddleOCR 和 AI 视觉模型均支持此功能，MinerU 暂不支持。
 
 ### 切换引擎
 
@@ -88,6 +99,7 @@
 | API Key      | 对应平台的 API 密钥                              |
 | 模型名称     | 可使用默认模型，也可填入该平台支持的其他视觉模型 |
 | API Base URL | 默认已预填，一般无需修改                         |
+| 自定义提示词 | 留空使用默认提示词，填写后所有 AI 视觉模型和自定义引擎均使用该提示词 |
 
 > 💡 各平台的 API Key 获取方式见下方引擎详情。
 
@@ -158,21 +170,21 @@
 
 插件支持以下 AI 平台的视觉大模型，将 PDF 逐页渲染为图片后发送给模型进行 OCR：
 
-| 引擎       | 平台       | 默认模型                                    | API Key 获取                                    |
-| ---------- | ---------- | ------------------------------------------- | ----------------------------------------------- |
-| OpenAI     | OpenAI     | `gpt-4o`                                    | [平台设置](https://platform.openai.com/)        |
-| Gemini     | Google     | `gemini-2.5-flash`                          | [AI Studio](https://aistudio.google.com/)       |
-| DeepSeek   | DeepSeek   | `deepseek-chat`                             | [开放平台](https://platform.deepseek.com/)      |
-| 通义千问   | 阿里云     | `qwen-vl-max`                               | [百炼平台](https://bailian.console.aliyun.com/) |
-| 智谱 GLM   | 智谱 AI    | `glm-4v-flash`                              | [开放平台](https://open.bigmodel.cn/)           |
-| Kimi       | 月之暗面   | `moonshot-v1-auto`                          | [开放平台](https://platform.moonshot.cn/)       |
-| Ollama     | 本地部署   | `llama3.2-vision`                           | 无需 Key                                        |
-| OpenRouter | OpenRouter | `google/gemini-2.5-flash-preview`           | [平台设置](https://openrouter.ai/)              |
-| Groq       | Groq       | `meta-llama/llama-4-scout-17b-16e-instruct` | [控制台](https://console.groq.com/)             |
-| Mistral AI | Mistral    | `pixtral-12b-2409`                          | [平台设置](https://console.mistral.ai/)         |
-| 浦源书生   | 浦源       | `internvl3.5-241b-a28b`                     | [开放平台](https://chat.intern-ai.org.cn/)      |
-| 小米 MiMo  | 小米       | `mimo-v2.5`                                 | [开放平台](https://xiaomimimo.com/)             |
-| NVIDIA NIM | NVIDIA     | `moonshotai/kimi-k2.6`                      | [NIM 平台](https://build.nvidia.com/)           |
+| 引擎       | 平台       | 默认模型                                        | API Key 获取                                    |
+| ---------- | ---------- | ----------------------------------------------- | ----------------------------------------------- |
+| OpenAI     | OpenAI     | `gpt-4o`                                        | [平台设置](https://platform.openai.com/)        |
+| Gemini     | Google     | `gemini-2.5-flash`                              | [AI Studio](https://aistudio.google.com/)       |
+| DeepSeek   | DeepSeek   | `deepseek-chat`                                 | [开放平台](https://platform.deepseek.com/)      |
+| 通义千问   | 阿里云     | `qwen-vl-max`                                   | [百炼平台](https://bailian.console.aliyun.com/) |
+| 智谱 GLM   | 智谱 AI    | `glm-4v-flash`                                  | [开放平台](https://open.bigmodel.cn/)           |
+| Kimi       | 月之暗面   | `moonshot-v1-auto`                              | [开放平台](https://platform.moonshot.cn/)       |
+| Ollama     | 本地部署   | `qwen2.5vl:7b`                                  | 无需 Key                                        |
+| OpenRouter | OpenRouter | `qwen/qwen3-vl-235b-a22b-instruct:free`         | [平台设置](https://openrouter.ai/)              |
+| Groq       | Groq       | `meta-llama/llama-4-maverick-17b-128e-instruct` | [控制台](https://console.groq.com/)             |
+| Mistral AI | Mistral    | `mistral-ocr-latest`                            | [平台设置](https://console.mistral.ai/)         |
+| 浦源书生   | 浦源       | `internvl3.5-241b-a28b`                         | [开放平台](https://chat.intern-ai.org.cn/)      |
+| 小米 MiMo  | 小米       | `mimo-v2.5`                                     | [开放平台](https://xiaomimimo.com/)             |
+| NVIDIA NIM | NVIDIA     | `moonshotai/kimi-k2.6`                          | [NIM 平台](https://build.nvidia.com/)           |
 
 > 💡 AI 视觉模型引擎不支持原生 PDF 输入，插件会自动将 PDF 逐页渲染为图片后发送。你也可以在模型名称中填入该平台支持的其他视觉模型。
 
