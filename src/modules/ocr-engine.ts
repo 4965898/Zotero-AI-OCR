@@ -154,33 +154,25 @@ export const ENGINE_MODELS = {
     name: "PP-OCRv5",
     description: "基础文字识别",
     platform: "paddleocr" as const,
-    syncPath: "/ocr",
     asyncModelName: "PP-OCRv5",
     responseType: "ocrResults",
+    asyncOnly: true,
   },
   "PP-StructureV3": {
     name: "PP-StructureV3",
     description: "文档结构解析",
     platform: "paddleocr" as const,
-    syncPath: "/layout-parsing",
     asyncModelName: "PP-StructureV3",
     responseType: "layoutParsingResults",
+    asyncOnly: true,
   },
-  "PaddleOCR-VL": {
-    name: "PaddleOCR-VL",
-    description: "视觉语言模型",
-    platform: "paddleocr" as const,
-    syncPath: "/layout-parsing",
-    asyncModelName: "PaddleOCR-VL",
-    responseType: "layoutParsingResults",
-  },
-  "PaddleOCR-VL-1.5": {
-    name: "PaddleOCR-VL-1.5",
+  "PaddleOCR-VL-1.6": {
+    name: "PaddleOCR-VL-1.6",
     description: "增强视觉语言模型",
     platform: "paddleocr" as const,
-    syncPath: "/layout-parsing",
-    asyncModelName: "PaddleOCR-VL-1.5",
+    asyncModelName: "PaddleOCR-VL-1.6",
     responseType: "layoutParsingResults",
+    asyncOnly: true,
   },
   "MinerU-pipeline": {
     name: "MinerU-pipeline",
@@ -366,29 +358,7 @@ export const ENGINE_ADVANCED_FEATURES: {
       defaultValue: true,
     },
   ],
-  "PaddleOCR-VL": [
-    {
-      key: "useDocOrientationClassify",
-      labelKey: "advanced-useDocOrientationClassify",
-      defaultValue: false,
-    },
-    {
-      key: "useDocUnwarping",
-      labelKey: "advanced-useDocUnwarping",
-      defaultValue: false,
-    },
-    {
-      key: "useLayoutDetection",
-      labelKey: "advanced-useLayoutDetection",
-      defaultValue: false,
-    },
-    {
-      key: "useChartRecognition",
-      labelKey: "advanced-useChartRecognition",
-      defaultValue: false,
-    },
-  ],
-  "PaddleOCR-VL-1.5": [
+  "PaddleOCR-VL-1.6": [
     {
       key: "useDocOrientationClassify",
       labelKey: "advanced-useDocOrientationClassify",
@@ -654,7 +624,7 @@ function buildMultipartBody(
   };
 }
 
-async function callAsyncAPI(
+export async function callAsyncAPI(
   engine: EngineType,
   filePath: string,
   isPdf: boolean,
@@ -1417,9 +1387,9 @@ async function renderPdfChrome(
     pageNumbers && pageNumbers.length > 0
       ? pageNumbers.filter((p) => p >= 1 && p <= doc.numPages)
       : Array.from(
-          { length: Math.min(doc.numPages, MAX_AI_PDF_PAGES) },
-          (_, i) => i + 1,
-        );
+        { length: Math.min(doc.numPages, MAX_AI_PDF_PAGES) },
+        (_, i) => i + 1,
+      );
   ztoolkit.log(
     `[AIOCR] renderPdfChrome: doc.numPages=${doc.numPages}, rendering ${pagesToRender.length} pages`,
   );
@@ -1545,9 +1515,9 @@ async function renderPdfCrossCompartment(
     pageNumbers && pageNumbers.length > 0
       ? pageNumbers.filter((p) => p >= 1 && p <= waivedDoc.numPages)
       : Array.from(
-          { length: Math.min(waivedDoc.numPages, MAX_AI_PDF_PAGES) },
-          (_, i) => i + 1,
-        );
+        { length: Math.min(waivedDoc.numPages, MAX_AI_PDF_PAGES) },
+        (_, i) => i + 1,
+      );
   ztoolkit.log(
     `[AIOCR] renderPdfCrossCompartment: doc.numPages=${waivedDoc.numPages}, rendering ${pagesToRender.length} pages`,
   );
@@ -2213,7 +2183,8 @@ export async function performOCR(
     pages = await callMinerUAPI(selectedEngine, filePath, isPdf, onProgress);
   } else {
     const apiMode = getPref("apiMode") as string;
-    if (apiMode === "async") {
+    const isAsyncOnly = (modelConfig as any).asyncOnly === true;
+    if (apiMode === "async" || isAsyncOnly) {
       pages = await callAsyncAPI(selectedEngine, filePath, isPdf, onProgress);
     } else {
       pages = await callSyncAPI(selectedEngine, filePath, isPdf, onProgress);
@@ -2357,30 +2328,28 @@ export async function testConnection(
       };
     }
 
-    const testPayload: Record<string, any> = {
-      file: "",
-      fileType: 1,
-    };
-
-    const testUrl = url + modelConfig.syncPath;
+    const testUrl = ASYNC_JOB_URL;
 
     const response = await Zotero.HTTP.request("POST", testUrl, {
-      body: JSON.stringify(testPayload),
+      body: JSON.stringify({
+        fileUrl: "https://example.com/test.pdf",
+        model: modelConfig.asyncModelName,
+      }),
       headers: {
         "Content-Type": "application/json",
-        Authorization: `token ${token}`,
+        Authorization: `bearer ${token}`,
       },
       responseType: "json",
       timeout: 10000,
     });
 
     const data = response.response;
-    if (data.errorCode === 0 || data.errorCode === undefined) {
+    if (data.code === 0) {
       return { success: true, message: getString("progress-test-success") };
     }
     return {
       success: false,
-      message: data.errorMsg || "Unknown error",
+      message: data.msg || "Unknown error",
     };
   } catch (e: any) {
     const msg = e.message || String(e);

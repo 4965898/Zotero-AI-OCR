@@ -2,6 +2,7 @@ import {
   performOCR,
   pdfToImages,
   callSyncAPI,
+  callAsyncAPI,
   ENGINE_ADVANCED_FEATURES,
   ENGINE_MODELS,
   EngineType,
@@ -18,8 +19,7 @@ import { getString } from "../utils/locale";
 const ALL_ENGINES: { value: string; label: string }[] = [
   { value: "PP-OCRv5", label: "PP-OCRv5 (基础文字识别)" },
   { value: "PP-StructureV3", label: "PP-StructureV3 (文档结构解析)" },
-  { value: "PaddleOCR-VL", label: "PaddleOCR-VL (视觉语言模型)" },
-  { value: "PaddleOCR-VL-1.5", label: "PaddleOCR-VL-1.5 (增强视觉语言模型)" },
+  { value: "PaddleOCR-VL-1.6", label: "PaddleOCR-VL-1.6 (增强视觉语言模型)" },
   { value: "MinerU-pipeline", label: "MinerU-pipeline (文档解析)" },
   { value: "MinerU-vlm", label: "MinerU-vlm (推荐文档解析)" },
   { value: "MinerU-HTML", label: "MinerU-HTML (HTML解析)" },
@@ -269,6 +269,16 @@ export function refreshAdvancedMenu() {
       "menuitem",
     );
     infoItem.setAttribute("label", "MinerU 仅支持异步 API");
+    infoItem.setAttribute("disabled", "true");
+    infoItem.style.cssText = "color: #999; font-size: 11px;";
+    menupopup.appendChild(infoItem);
+  }
+  if (modelConfig && (modelConfig as any).asyncOnly === true) {
+    const infoItem = doc.createElementNS(
+      "http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul",
+      "menuitem",
+    );
+    infoItem.setAttribute("label", "该引擎仅支持异步 API");
     infoItem.setAttribute("disabled", "true");
     infoItem.style.cssText = "color: #999; font-size: 11px;";
     menupopup.appendChild(infoItem);
@@ -853,11 +863,10 @@ async function processPageRangeOCR(
         let pageMarkdown = "";
 
         if (isPaddleOCR) {
-          const pages = await callSyncAPI(
-            engine as EngineType,
-            tempPath,
-            false,
-          );
+          const isAsyncOnly = (modelConfig as any).asyncOnly === true;
+          const pages = isAsyncOnly
+            ? await callAsyncAPI(engine as EngineType, tempPath, false)
+            : await callSyncAPI(engine as EngineType, tempPath, false);
           pageMarkdown = pages.map((p) => p.markdown).join("\n");
         } else {
           const result = await performOCR(
@@ -931,15 +940,15 @@ export async function processOCRForAttachment(
   const progressWin = silent
     ? null
     : new ztoolkit.ProgressWindow(addon.data.config.addonName, {
-        closeOnClick: true,
-        closeTime: -1,
+      closeOnClick: true,
+      closeTime: -1,
+    })
+      .createLine({
+        text: getString("progress-ocr-start"),
+        type: "default",
+        progress: 0,
       })
-        .createLine({
-          text: getString("progress-ocr-start"),
-          type: "default",
-          progress: 0,
-        })
-        .show();
+      .show();
 
   try {
     const filePath = await attachment.getFilePathAsync();
@@ -949,9 +958,10 @@ export async function processOCRForAttachment(
     const modelConfig = ENGINE_MODELS[engine as EngineType];
     const isMinerU = modelConfig && (modelConfig as any).platform === "mineru";
     const isAI = modelConfig && (modelConfig as any).platform === "ai";
+    const isAsyncOnly = modelConfig && (modelConfig as any).asyncOnly === true;
     const apiMode = getPref("apiMode") as string;
 
-    if (!isMinerU && !isAI && apiMode === "sync") {
+    if (!isMinerU && !isAI && !isAsyncOnly && apiMode === "sync") {
       const pageCount = await getPdfPageCount(filePath);
       if (pageCount > 0) {
         progressWin?.changeLine({
@@ -973,7 +983,7 @@ export async function processOCRForAttachment(
             args: { current: String(current), total: String(total) },
           }),
           progress:
-            !isMinerU && !isAI && apiMode === "sync"
+            !isMinerU && !isAI && !isAsyncOnly && apiMode === "sync"
               ? Math.round((current / total) * 80) + 10
               : Math.round((current / total) * 100),
         });

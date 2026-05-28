@@ -126,11 +126,12 @@ function updateApiModeVisibility(win: Window) {
   const modelConfig = ENGINE_MODELS[engine as EngineType];
   const isMinerU = modelConfig && (modelConfig as any).platform === "mineru";
   const isAI = modelConfig && (modelConfig as any).platform === "ai";
+  const isAsyncOnly = modelConfig && (modelConfig as any).asyncOnly === true;
 
   const apiModeLabel = doc.getElementById("aiocr-api-mode-label");
   const apiModeSelect = doc.getElementById("aiocr-api-mode") as XUL.MenuList;
   if (apiModeLabel && apiModeSelect) {
-    if (isMinerU || isAI || isCustom) {
+    if (isMinerU || isAI || isCustom || isAsyncOnly) {
       (apiModeLabel as HTMLElement).setAttribute("hidden", "true");
       apiModeSelect.setAttribute("hidden", "true");
     } else {
