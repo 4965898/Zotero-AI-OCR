@@ -3,6 +3,7 @@ import {
   refreshAdvancedMenu,
 } from "./modules/context-menu";
 import { registerAutoOCR } from "./modules/auto-ocr";
+import { registerAnnotationOCR } from "./modules/annotation-ocr";
 import { getString, initLocale } from "./utils/locale";
 import { registerPrefsScripts } from "./modules/preferenceScript";
 import { createZToolkit } from "./utils/ztoolkit";
@@ -19,6 +20,8 @@ async function onStartup() {
   registerPrefs();
 
   registerAutoOCR();
+
+  registerAnnotationOCR();
 
   await Promise.all(
     Zotero.getMainWindows().map((win) => onMainWindowLoad(win)),

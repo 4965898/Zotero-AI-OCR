@@ -940,15 +940,15 @@ export async function processOCRForAttachment(
   const progressWin = silent
     ? null
     : new ztoolkit.ProgressWindow(addon.data.config.addonName, {
-      closeOnClick: true,
-      closeTime: -1,
-    })
-      .createLine({
-        text: getString("progress-ocr-start"),
-        type: "default",
-        progress: 0,
+        closeOnClick: true,
+        closeTime: -1,
       })
-      .show();
+        .createLine({
+          text: getString("progress-ocr-start"),
+          type: "default",
+          progress: 0,
+        })
+        .show();
 
   try {
     const filePath = await attachment.getFilePathAsync();

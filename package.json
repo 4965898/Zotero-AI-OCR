@@ -1,7 +1,7 @@
 {
   "name": "zotero-ai-ocr",
   "type": "module",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "description": "AI OCR plugin for Zotero - AI-powered OCR recognition with PaddleOCR and MinerU",
   "config": {
     "addonName": "AI OCR",

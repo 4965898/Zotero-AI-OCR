@@ -1387,9 +1387,9 @@ async function renderPdfChrome(
     pageNumbers && pageNumbers.length > 0
       ? pageNumbers.filter((p) => p >= 1 && p <= doc.numPages)
       : Array.from(
-        { length: Math.min(doc.numPages, MAX_AI_PDF_PAGES) },
-        (_, i) => i + 1,
-      );
+          { length: Math.min(doc.numPages, MAX_AI_PDF_PAGES) },
+          (_, i) => i + 1,
+        );
   ztoolkit.log(
     `[AIOCR] renderPdfChrome: doc.numPages=${doc.numPages}, rendering ${pagesToRender.length} pages`,
   );
@@ -1515,9 +1515,9 @@ async function renderPdfCrossCompartment(
     pageNumbers && pageNumbers.length > 0
       ? pageNumbers.filter((p) => p >= 1 && p <= waivedDoc.numPages)
       : Array.from(
-        { length: Math.min(waivedDoc.numPages, MAX_AI_PDF_PAGES) },
-        (_, i) => i + 1,
-      );
+          { length: Math.min(waivedDoc.numPages, MAX_AI_PDF_PAGES) },
+          (_, i) => i + 1,
+        );
   ztoolkit.log(
     `[AIOCR] renderPdfCrossCompartment: doc.numPages=${waivedDoc.numPages}, rendering ${pagesToRender.length} pages`,
   );
