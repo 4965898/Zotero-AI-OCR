@@ -568,6 +568,16 @@ function bindPrefEvents(win: Window) {
       }
     });
   }
+
+  const githubLink = doc.getElementById("aiocr-github-link");
+  if (githubLink) {
+    githubLink.addEventListener("click", (e) => {
+      e.preventDefault();
+      Zotero.launchURL(
+        "https://github.com/4965898/Zotero-AI-OCR",
+      );
+    });
+  }
 }
 
 function initAIProviderTab(win: Window) {
