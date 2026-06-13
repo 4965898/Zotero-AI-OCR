@@ -540,6 +540,9 @@ function extractTextFromPrunedResult(prunedResult: any): string {
       .join("\n");
   }
   if (prunedResult.text) return prunedResult.text;
+  if (Array.isArray(prunedResult.rec_texts)) {
+    return prunedResult.rec_texts.join("\n");
+  }
   return JSON.stringify(prunedResult, null, 2);
 }
 
