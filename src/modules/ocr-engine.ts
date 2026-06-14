@@ -590,6 +590,7 @@ const ASYNC_JOB_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs";
 function buildMultipartBody(
   fileBytes: Uint8Array,
   fileName: string,
+  fileContentType: string,
   fields: Record<string, string>,
 ): { body: Uint8Array; contentType: string } {
   const encoder = new TextEncoder();
@@ -606,7 +607,7 @@ function buildMultipartBody(
 
   parts.push(
     encoder.encode(
-      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: application/pdf\r\n\r\n`,
+      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: ${fileContentType}\r\n\r\n`,
     ),
   );
   parts.push(fileBytes);
@@ -644,11 +645,13 @@ export async function callAsyncAPI(
   const advancedFeatures = getEnabledAdvancedFeatures(engine);
 
   const fileBytes = await IOUtils.read(filePath);
-  const fileName = isPdf ? "document.pdf" : "image.jpg";
+  const fileName = isPdf ? "document.pdf" : "image.png";
+  const fileContentType = isPdf ? "application/pdf" : "image/png";
 
   const { body: submitBody, contentType } = buildMultipartBody(
     fileBytes,
     fileName,
+    fileContentType,
     {
       model: modelConfig.asyncModelName,
       optionalPayload: JSON.stringify(advancedFeatures),
@@ -1205,29 +1208,7 @@ export async function pdfToImages(
   let shouldCloseReader = false;
 
   try {
-    try {
-      const pdfjsLib = await loadPdfJsDirect();
-      if (pdfjsLib) {
-        ztoolkit.log(
-          "[AIOCR] pdfToImages: trying chrome compartment rendering...",
-        );
-        const images = await renderPdfChrome(
-          pdfjsLib,
-          filePath,
-          onProgress,
-          pageNumbers,
-        );
-        ztoolkit.log(
-          `[AIOCR] pdfToImages: chrome compartment rendering succeeded, ${images.length} pages`,
-        );
-        return images;
-      }
-    } catch (e: any) {
-      ztoolkit.log(
-        `[AIOCR] pdfToImages: chrome compartment rendering failed: ${e.message}`,
-      );
-    }
-
+    // 优先尝试从 Reader 获取 pdf.js（在 HTML iframe 中渲染，CMap 字体支持更完善）
     let pdfjsLib: any = null;
     let iframeWindow: any = null;
 
@@ -1314,44 +1295,76 @@ export async function pdfToImages(
       }
     }
 
-    if (!pdfjsLib) {
-      throw new Error(
-        "无法获取 PDF 渲染环境。AI 视觉模型识别 PDF 需要 pdf.js 支持。\n请尝试以下方法：\n1. 先在 Zotero 中打开任意 PDF 文件（让 pdf.js 加载），然后重试\n2. 更新 Zotero 到最新版本\n3. 改用 PaddleOCR 或 MinerU 引擎",
-      );
+    // 优先级1：CrossCompartment（HTML iframe canvas，CMap 字体支持完善）
+    if (pdfjsLib && iframeWindow) {
+      try {
+        ztoolkit.log(
+          "[AIOCR] pdfToImages: trying cross-compartment rendering with Cu.waiveXrays...",
+        );
+        const images = await renderPdfCrossCompartment(
+          pdfjsLib,
+          iframeWindow,
+          filePath,
+          onProgress,
+          pageNumbers,
+        );
+        ztoolkit.log(
+          `[AIOCR] pdfToImages: cross-compartment rendering succeeded, ${images.length} pages`,
+        );
+        return images;
+      } catch (e: any) {
+        ztoolkit.log(
+          `[AIOCR] pdfToImages: cross-compartment rendering failed: ${e.message}, trying iframe sandbox...`,
+        );
+      }
     }
 
+    // 优先级2：IframeSandbox（HTML iframe sandbox，CMap 字体支持完善）
+    if (iframeWindow) {
+      try {
+        const images = await renderPdfIframeSandbox(
+          iframeWindow,
+          filePath,
+          onProgress,
+          pageNumbers,
+        );
+        ztoolkit.log(
+          `[AIOCR] pdfToImages: iframe sandbox rendering succeeded, ${images.length} pages`,
+        );
+        return images;
+      } catch (e: any) {
+        ztoolkit.log(
+          `[AIOCR] pdfToImages: iframe sandbox rendering failed: ${e.message}, trying chrome compartment...`,
+        );
+      }
+    }
+
+    // 优先级3（最后回退）：Chrome compartment（XUL canvas，CMap 字体支持不完整）
     try {
-      ztoolkit.log(
-        "[AIOCR] pdfToImages: trying cross-compartment rendering with Cu.waiveXrays...",
-      );
-      const images = await renderPdfCrossCompartment(
-        pdfjsLib,
-        iframeWindow,
-        filePath,
-        onProgress,
-        pageNumbers,
-      );
-      ztoolkit.log(
-        `[AIOCR] pdfToImages: cross-compartment rendering succeeded, ${images.length} pages`,
-      );
-      return images;
+      const chromePdfjsLib = await loadPdfJsDirect();
+      if (chromePdfjsLib) {
+        ztoolkit.log(
+          "[AIOCR] pdfToImages: trying chrome compartment rendering (fallback)...",
+        );
+        const images = await renderPdfChrome(
+          chromePdfjsLib,
+          filePath,
+          onProgress,
+          pageNumbers,
+        );
+        ztoolkit.log(
+          `[AIOCR] pdfToImages: chrome compartment rendering succeeded, ${images.length} pages`,
+        );
+        return images;
+      }
     } catch (e: any) {
       ztoolkit.log(
-        `[AIOCR] pdfToImages: cross-compartment rendering failed: ${e.message}, trying iframe sandbox...`,
+        `[AIOCR] pdfToImages: chrome compartment rendering failed: ${e.message}`,
       );
     }
 
-    if (!iframeWindow) {
-      throw new Error(
-        `PDF 渲染失败：无法获取 iframe 窗口。错误：跨 compartment 渲染失败且无 iframe 可用`,
-      );
-    }
-
-    return await renderPdfIframeSandbox(
-      iframeWindow,
-      filePath,
-      onProgress,
-      pageNumbers,
+    throw new Error(
+      "无法获取 PDF 渲染环境。AI 视觉模型识别 PDF 需要 pdf.js 支持。\n请尝试以下方法：\n1. 先在 Zotero 中打开任意 PDF 文件（让 pdf.js 加载），然后重试\n2. 更新 Zotero 到最新版本\n3. 改用 PaddleOCR 或 MinerU 引擎",
     );
   } finally {
     if (shouldCloseReader && openedReader) {
@@ -1385,7 +1398,11 @@ async function renderPdfChrome(
     `[AIOCR] renderPdfChrome: pdfBytes length=${bytes.length}, getDocument type=${typeof pdfjsLib.getDocument}`,
   );
 
-  const doc = await pdfjsLib.getDocument(bytes).promise;
+  const doc = await pdfjsLib.getDocument({
+    data: bytes,
+    disableFontFace: true,
+    useSystemFonts: false,
+  }).promise;
   const pagesToRender =
     pageNumbers && pageNumbers.length > 0
       ? pageNumbers.filter((p) => p >= 1 && p <= doc.numPages)
@@ -1429,6 +1446,9 @@ async function renderPdfChrome(
     canvas.height = viewport.height;
     const ctx = canvas.getContext("2d");
 
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
     await page.render({ canvasContext: ctx, viewport }).promise;
 
     const dataUrl = canvas.toDataURL("image/png");
@@ -1470,11 +1490,19 @@ async function renderPdfCrossCompartment(
 
   let doc: any = null;
 
+  const makeDocOpts = (data: any) => {
+    const opts = new iframeWindow.Object();
+    opts.data = data;
+    opts.disableFontFace = true;
+    opts.useSystemFonts = false;
+    return opts;
+  };
+
   if (iframeWindow) {
     try {
       const iframeBytes = new iframeWindow.Uint8Array(chromeBytes.length);
       iframeBytes.set(chromeBytes);
-      doc = await waivedLib.getDocument(iframeBytes).promise;
+      doc = await waivedLib.getDocument(makeDocOpts(iframeBytes)).promise;
       ztoolkit.log(
         "[AIOCR] renderPdfCrossCompartment: getDocument with iframe Uint8Array succeeded",
       );
@@ -1491,7 +1519,7 @@ async function renderPdfCrossCompartment(
         chromeBytes,
         iframeWindow || Zotero.getMainWindow(),
       );
-      doc = await waivedLib.getDocument(clonedBytes).promise;
+      doc = await waivedLib.getDocument(makeDocOpts(clonedBytes)).promise;
       ztoolkit.log(
         "[AIOCR] renderPdfCrossCompartment: getDocument with Cu.cloneInto succeeded",
       );
@@ -1504,7 +1532,11 @@ async function renderPdfCrossCompartment(
 
   if (!doc) {
     try {
-      doc = await waivedLib.getDocument(chromeBytes).promise;
+      doc = await waivedLib.getDocument({
+        data: chromeBytes,
+        disableFontFace: true,
+        useSystemFonts: false,
+      }).promise;
       ztoolkit.log(
         "[AIOCR] renderPdfCrossCompartment: getDocument with direct pass succeeded",
       );
@@ -1559,6 +1591,9 @@ async function renderPdfCrossCompartment(
     iframeCanvas.width = vpWidth;
     iframeCanvas.height = vpHeight;
     const iframeCtx = iframeCanvas.getContext("2d");
+
+    iframeCtx.fillStyle = "#ffffff";
+    iframeCtx.fillRect(0, 0, iframeCanvas.width, iframeCanvas.height);
 
     const renderOpts = new iframeWindow.Object();
     renderOpts.canvasContext = iframeCtx;
@@ -1648,7 +1683,7 @@ async function renderPdfIframeSandbox(
       "    for (var i = 0; i < binaryString.length; i++) {",
       "      bytes[i] = binaryString.charCodeAt(i);",
       "    }",
-      "    var doc = await pdfjsLib.getDocument(bytes).promise;",
+      "    var doc = await pdfjsLib.getDocument({data: bytes, disableFontFace: true, useSystemFonts: false}).promise;",
       "    var pagesToRender = pageNumbersJson ? JSON.parse(pageNumbersJson).filter(function(p) { return p >= 1 && p <= doc.numPages; }) : null;",
       "    var numPages = pagesToRender ? pagesToRender.length : Math.min(doc.numPages, maxPages);",
       "    if (numPages <= 0) {",
@@ -1665,6 +1700,8 @@ async function renderPdfIframeSandbox(
       "      canvas.width = viewport.width;",
       "      canvas.height = viewport.height;",
       "      var ctx = canvas.getContext('2d');",
+      "      ctx.fillStyle = '#ffffff';",
+      "      ctx.fillRect(0, 0, canvas.width, canvas.height);",
       "      await page.render({ canvasContext: ctx, viewport: viewport }).promise;",
       "      var dataUrl = canvas.toDataURL('image/png');",
       "      results.push(dataUrl.split(',')[1]);",
@@ -1711,7 +1748,7 @@ async function renderPdfIframeSandbox(
       "    for (var i = 0; i < binaryString.length; i++) {",
       "      bytes[i] = binaryString.charCodeAt(i);",
       "    }",
-      "    var doc = await pdfjsLib.getDocument(bytes).promise;",
+      "    var doc = await pdfjsLib.getDocument({data: bytes, disableFontFace: true, useSystemFonts: false}).promise;",
       "    var pagesToRender = window._aiocr_pageNumbersJson ? JSON.parse(window._aiocr_pageNumbersJson).filter(function(p) { return p >= 1 && p <= doc.numPages; }) : null;",
       "    var numPages = pagesToRender ? pagesToRender.length : Math.min(doc.numPages, window._aiocr_maxPages);",
       "    if (numPages <= 0) {",
@@ -1728,6 +1765,8 @@ async function renderPdfIframeSandbox(
       "      canvas.width = viewport.width;",
       "      canvas.height = viewport.height;",
       "      var ctx = canvas.getContext('2d');",
+      "      ctx.fillStyle = '#ffffff';",
+      "      ctx.fillRect(0, 0, canvas.width, canvas.height);",
       "      await page.render({ canvasContext: ctx, viewport: viewport }).promise;",
       "      var dataUrl = canvas.toDataURL('image/png');",
       "      results.push(dataUrl.split(',')[1]);",
