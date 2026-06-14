@@ -17,7 +17,8 @@ import {
 import { getString } from "../utils/locale";
 
 const ALL_ENGINES: { value: string; label: string }[] = [
-  { value: "PP-OCRv5", label: "PP-OCRv5 (基础文字识别)" },
+  { value: "PP-OCRv6", label: "PP-OCRv6 (基础文字识别-最新)" },
+  { value: "PP-OCRv5", label: "PP-OCRv5 (基础文字识别-旧版)" },
   { value: "PP-StructureV3", label: "PP-StructureV3 (文档结构解析)" },
   { value: "PaddleOCR-VL-1.6", label: "PaddleOCR-VL-1.6 (增强视觉语言模型)" },
   { value: "MinerU-pipeline", label: "MinerU-pipeline (文档解析)" },
@@ -731,7 +732,7 @@ async function handlePageRangeOCR() {
     return;
   }
 
-  const engine = (getPref("engine") as string) || "PP-OCRv5";
+  const engine = (getPref("engine") as string) || "PP-OCRv6";
   const modelConfig = ENGINE_MODELS[engine as EngineType];
   const isMinerU = modelConfig && (modelConfig as any).platform === "mineru";
 
@@ -813,7 +814,7 @@ async function processPageRangeOCR(
     const filePath = await attachment.getFilePathAsync();
     if (!filePath) throw new Error("Cannot get file path");
 
-    const engine = (getPref("engine") as string) || "PP-OCRv5";
+    const engine = (getPref("engine") as string) || "PP-OCRv6";
     const modelConfig = ENGINE_MODELS[engine as EngineType];
     const isPaddleOCR =
       modelConfig && (modelConfig as any).platform === "paddleocr";
@@ -940,21 +941,21 @@ export async function processOCRForAttachment(
   const progressWin = silent
     ? null
     : new ztoolkit.ProgressWindow(addon.data.config.addonName, {
-        closeOnClick: true,
-        closeTime: -1,
+      closeOnClick: true,
+      closeTime: -1,
+    })
+      .createLine({
+        text: getString("progress-ocr-start"),
+        type: "default",
+        progress: 0,
       })
-        .createLine({
-          text: getString("progress-ocr-start"),
-          type: "default",
-          progress: 0,
-        })
-        .show();
+      .show();
 
   try {
     const filePath = await attachment.getFilePathAsync();
     if (!filePath) throw new Error("Cannot get file path");
 
-    const engine = (getPref("engine") as string) || "PP-OCRv5";
+    const engine = (getPref("engine") as string) || "PP-OCRv6";
     const modelConfig = ENGINE_MODELS[engine as EngineType];
     const isMinerU = modelConfig && (modelConfig as any).platform === "mineru";
     const isAI = modelConfig && (modelConfig as any).platform === "ai";

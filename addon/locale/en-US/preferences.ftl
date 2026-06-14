@@ -1,6 +1,7 @@
 pref-title = AI OCR Settings
 pref-engine = OCR Engine
-pref-engine-ppocrv5 = PP-OCRv5 (Basic Text Recognition)
+pref-engine-ppocrv6 = PP-OCRv6 (Basic Text Recognition - Latest)
+pref-engine-ppocrv5 = PP-OCRv5 (Basic Text Recognition - Legacy)
 pref-engine-ppstructurev3 = PP-StructureV3 (Document Structure Parsing)
 pref-engine-paddleocrvl16 = PaddleOCR-VL-1.6 (Enhanced Vision Language Model)
 pref-engine-mineru-pipeline = MinerU-pipeline (Document Parsing)

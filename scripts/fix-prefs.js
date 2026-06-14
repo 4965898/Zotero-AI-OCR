@@ -13,7 +13,7 @@ const buildDir = path.join(__dirname, "..", ".scaffold", "build", "addon");
 const prefsFile = path.join(buildDir, "prefs.js");
 
 const prefs = [
-  { key: "engine", type: "string", value: "PP-OCRv5" },
+  { key: "engine", type: "string", value: "PP-OCRv6" },
   { key: "apiMode", type: "string", value: "sync" },
   { key: "noteNaming", type: "string", value: "default" },
   {

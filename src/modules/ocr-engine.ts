@@ -150,9 +150,17 @@ function getEffectivePrompt(defaultPrompt: string): string {
 const MAX_AI_PDF_PAGES = 50;
 
 export const ENGINE_MODELS = {
+  "PP-OCRv6": {
+    name: "PP-OCRv6",
+    description: "基础文字识别（最新）",
+    platform: "paddleocr" as const,
+    asyncModelName: "PP-OCRv6",
+    responseType: "ocrResults",
+    asyncOnly: true,
+  },
   "PP-OCRv5": {
     name: "PP-OCRv5",
-    description: "基础文字识别",
+    description: "基础文字识别（旧版）",
     platform: "paddleocr" as const,
     asyncModelName: "PP-OCRv5",
     responseType: "ocrResults",
@@ -299,6 +307,23 @@ export const ENGINE_ADVANCED_FEATURES: {
     defaultValue: boolean;
   }[];
 } = {
+  "PP-OCRv6": [
+    {
+      key: "useDocOrientationClassify",
+      labelKey: "advanced-useDocOrientationClassify",
+      defaultValue: false,
+    },
+    {
+      key: "useDocUnwarping",
+      labelKey: "advanced-useDocUnwarping",
+      defaultValue: false,
+    },
+    {
+      key: "useTextlineOrientation",
+      labelKey: "advanced-useTextlineOrientation",
+      defaultValue: false,
+    },
+  ],
   "PP-OCRv5": [
     {
       key: "useDocOrientationClassify",
@@ -1387,9 +1412,9 @@ async function renderPdfChrome(
     pageNumbers && pageNumbers.length > 0
       ? pageNumbers.filter((p) => p >= 1 && p <= doc.numPages)
       : Array.from(
-          { length: Math.min(doc.numPages, MAX_AI_PDF_PAGES) },
-          (_, i) => i + 1,
-        );
+        { length: Math.min(doc.numPages, MAX_AI_PDF_PAGES) },
+        (_, i) => i + 1,
+      );
   ztoolkit.log(
     `[AIOCR] renderPdfChrome: doc.numPages=${doc.numPages}, rendering ${pagesToRender.length} pages`,
   );
@@ -1515,9 +1540,9 @@ async function renderPdfCrossCompartment(
     pageNumbers && pageNumbers.length > 0
       ? pageNumbers.filter((p) => p >= 1 && p <= waivedDoc.numPages)
       : Array.from(
-          { length: Math.min(waivedDoc.numPages, MAX_AI_PDF_PAGES) },
-          (_, i) => i + 1,
-        );
+        { length: Math.min(waivedDoc.numPages, MAX_AI_PDF_PAGES) },
+        (_, i) => i + 1,
+      );
   ztoolkit.log(
     `[AIOCR] renderPdfCrossCompartment: doc.numPages=${waivedDoc.numPages}, rendering ${pagesToRender.length} pages`,
   );

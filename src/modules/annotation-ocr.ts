@@ -79,7 +79,7 @@ async function handleSingleAnnotationOCR(
     throw new Error(getString("progress-annotation-no-image"));
   }
 
-  const engine = (getPref("engine") as string) || "PP-OCRv5";
+  const engine = (getPref("engine") as string) || "PP-OCRv6";
   const modelConfig = ENGINE_MODELS[engine as EngineType] as any;
   const isMinerU = modelConfig && modelConfig.platform === "mineru";
 

@@ -1,6 +1,7 @@
 pref-title = AI OCR 设置
 pref-engine = OCR 引擎
-pref-engine-ppocrv5 = PP-OCRv5 (基础文字识别)
+pref-engine-ppocrv6 = PP-OCRv6 (基础文字识别-最新)
+pref-engine-ppocrv5 = PP-OCRv5 (基础文字识别-旧版)
 pref-engine-ppstructurev3 = PP-StructureV3 (文档结构解析)
 pref-engine-paddleocrvl16 = PaddleOCR-VL-1.6 (增强视觉语言模型)
 pref-engine-mineru-pipeline = MinerU-pipeline (文档解析)

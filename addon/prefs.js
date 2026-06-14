@@ -1,4 +1,4 @@
-pref("extensions.zotero.aiocr.engine", "PP-OCRv5");
+pref("extensions.zotero.aiocr.engine", "PP-OCRv6");
 pref("extensions.zotero.aiocr.apiMode", "sync");
 pref("extensions.zotero.aiocr.noteNaming", "default");
 pref(
