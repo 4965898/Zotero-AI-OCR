@@ -71,7 +71,9 @@
 ### 图片注释 OCR
 
 1. 在 PDF 阅读器中，使用「选择区域」工具框选 PDF 某一区域，创建图片注释
-2. 在左侧边栏找到该图片注释，点击注释标题行末尾的 **OCR** 按钮
+2. 在左侧边栏找到该图片注释，可通过以下两种方式触发 OCR：
+   - 点击注释标题行末尾的 **OCR** 按钮
+   - 点击注释右上角 **三点菜单** → 选择 **OCR 识别此图片**
 3. 等待识别完成，结果将以评论形式附加到该注释下方
 
 > 💡 PaddleOCR 和 AI 视觉模型均支持此功能，MinerU 仅支持完整 PDF 文档，不支持图片注释识别。
@@ -246,6 +248,15 @@ addon/
 ```
 
 ## 更新日志
+
+### v1.9.2
+
+- 🐛 **修复图片注释 OCR 无响应** — 修复点击 OCR 按钮毫无反应的问题
+  - 修复注释 ID 解析 bug：`params.annotation.id` 始终为 Zotero 条目 key（8 位字母数字字符串），原 `parseInt` 逻辑会对以数字开头的 key（约 28%）误判为数字 ID，导致查找失败
+  - 改用 `Zotero.Items.getByLibraryAndKey` 直接查找，与 Zotero 官方 `reader.js` 实现保持一致
+  - 修复跨 compartment 场景下 `stopPropagation` 异常导致的静默失败
+- 🆕 **新增三点菜单入口** — 图片注释 OCR 现可通过注释右上角三点菜单触发，与 Zotero 原生交互一致
+- ⚡ **优化图片获取** — 优先使用 `params.annotation.image` 中已加载的 data URI，避免冗余 `toJSON` 调用
 
 ### v1.9.0
 

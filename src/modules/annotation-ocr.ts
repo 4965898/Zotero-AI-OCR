@@ -3,56 +3,113 @@ import { getPref } from "../utils/prefs";
 import { getString } from "../utils/locale";
 
 export function registerAnnotationOCR() {
-  if (typeof Zotero.Reader?.registerEventListener === "function") {
-    Zotero.Reader.registerEventListener(
-      "renderSidebarAnnotationHeader",
-      (event: any) => {
-        const { reader, doc, params, append } = event;
-        if (params.annotation.type !== "image") return;
-
-        const btn = doc.createElement("button");
-        btn.className = "aiocr-annotation-btn";
-        btn.textContent = "OCR";
-        btn.style.cssText =
-          "margin-left:4px;padding:0;width:22px;height:22px;font-size:9px;" +
-          "border-radius:2px;border:1px solid #bbb;background:#f5f5f5;" +
-          "cursor:pointer;color:#555;display:inline-flex;align-items:center;" +
-          "justify-content:center;line-height:1;";
-
-        btn.addEventListener("click", async (e: Event) => {
-          e.stopPropagation();
-          e.preventDefault();
-          btn.disabled = true;
-          btn.textContent = "⏳";
-          try {
-            await handleSingleAnnotationOCR(params.annotation.id, reader);
-            btn.textContent = "✓";
-          } catch (err: any) {
-            btn.textContent = "✗";
-            ztoolkit.log(`[AIOCR] Annotation OCR failed: ${err.message}`);
-          }
-          setTimeout(() => {
-            btn.textContent = "OCR";
-            btn.disabled = false;
-          }, 2000);
-        });
-
-        append(btn);
-      },
-      addon.data.config.addonID,
-    );
-    ztoolkit.log(
-      "[AIOCR] Annotation OCR registered via renderSidebarAnnotationHeader",
-    );
-  } else {
+  if (typeof Zotero.Reader?.registerEventListener !== "function") {
     ztoolkit.log(
       "[AIOCR] Zotero.Reader.registerEventListener not available",
     );
+    return;
   }
+
+  // Register OCR option in the annotation context menu (three-dot "more" menu)
+  Zotero.Reader.registerEventListener(
+    "createAnnotationContextMenu",
+    (event: any) => {
+      const { reader, params, append } = event;
+      const attachmentItem = reader._item;
+      if (!attachmentItem) return;
+
+      // Look up the annotation to check if it's an image annotation
+      const annotation = Zotero.Items.getByLibraryAndKey(
+        attachmentItem.libraryID,
+        params.currentID,
+      );
+
+      if (
+        !annotation ||
+        !annotation.isAnnotation() ||
+        annotation.annotationType !== "image"
+      ) {
+        return;
+      }
+
+      // MinerU doesn't support image annotation OCR
+      const engine = (getPref("engine") as string) || "PP-OCRv6";
+      const modelConfig = ENGINE_MODELS[engine as EngineType] as any;
+      if (modelConfig && modelConfig.platform === "mineru") {
+        return;
+      }
+
+      append({
+        label: getString("menuitem-annotation-ocr"),
+        onCommand: () => {
+          handleSingleAnnotationOCR(
+            {
+              id: annotation.key,
+              libraryID: annotation.libraryID,
+            },
+            reader,
+          ).catch((err: any) => {
+            ztoolkit.log(
+              `[AIOCR] Annotation OCR failed (context menu): ${err.message}`,
+            );
+          });
+        },
+      });
+    },
+    addon.data.config.addonID,
+  );
+
+  // Register OCR button in the annotation sidebar header
+  Zotero.Reader.registerEventListener(
+    "renderSidebarAnnotationHeader",
+    (event: any) => {
+      const { reader, doc, params, append } = event;
+      if (params.annotation.type !== "image") return;
+
+      const btn = doc.createElement("button");
+      btn.className = "aiocr-annotation-btn";
+      btn.textContent = "OCR";
+      btn.style.cssText =
+        "margin-left:4px;padding:0;width:22px;height:22px;font-size:9px;" +
+        "border-radius:2px;border:1px solid #bbb;background:#f5f5f5;" +
+        "cursor:pointer;color:#555;display:inline-flex;align-items:center;" +
+        "justify-content:center;line-height:1;";
+
+      btn.addEventListener("click", async (e: Event) => {
+        // Wrap stopPropagation in try/catch for cross-compartment safety
+        try {
+          e.stopPropagation();
+          e.preventDefault();
+        } catch {
+          // ignore
+        }
+        btn.disabled = true;
+        btn.textContent = "⏳";
+        try {
+          await handleSingleAnnotationOCR(params.annotation, reader);
+          btn.textContent = "✓";
+        } catch (err: any) {
+          btn.textContent = "✗";
+          ztoolkit.log(`[AIOCR] Annotation OCR failed: ${err.message}`);
+        }
+        setTimeout(() => {
+          btn.textContent = "OCR";
+          btn.disabled = false;
+        }, 2000);
+      });
+
+      append(btn);
+    },
+    addon.data.config.addonID,
+  );
+
+  ztoolkit.log(
+    "[AIOCR] Annotation OCR registered (context menu + sidebar header)",
+  );
 }
 
 async function handleSingleAnnotationOCR(
-  annotationId: string,
+  annotationJson: { id: string; libraryID: number; image?: string },
   reader: any,
 ): Promise<void> {
   const attachmentItem = reader._item;
@@ -60,16 +117,14 @@ async function handleSingleAnnotationOCR(
     throw new Error("Cannot find attachment item");
   }
 
-  let annotation: Zotero.Item | false;
-
-  if (!isNaN(parseInt(annotationId, 10))) {
-    annotation = Zotero.Items.get(parseInt(annotationId, 10));
-  } else {
-    annotation = Zotero.Items.getByLibraryAndKey(
-      attachmentItem.libraryID,
-      annotationId,
-    );
-  }
+  // annotationJson.id is always the Zotero item key (8-char alphanumeric string)
+  // Use getByLibraryAndKey directly — never parseInt (keys starting with digits
+  // would cause parseInt to return a wrong numeric item ID)
+  const libraryID = annotationJson.libraryID || attachmentItem.libraryID;
+  const annotation = Zotero.Items.getByLibraryAndKey(
+    libraryID,
+    annotationJson.id,
+  );
 
   if (
     !annotation ||
@@ -103,23 +158,24 @@ async function handleSingleAnnotationOCR(
   try {
     let imageBase64: string | null = null;
 
-    try {
-      const annotationData = await Zotero.Annotations.toJSON(annotation);
-      if (annotationData.image) {
-        const dataUri = annotationData.image;
-        if (dataUri.startsWith("data:image/png;base64,")) {
-          imageBase64 = dataUri.substring("data:image/png;base64,".length);
-        } else if (dataUri.startsWith("data:")) {
-          const commaIndex = dataUri.indexOf(",");
-          if (commaIndex !== -1) {
-            imageBase64 = dataUri.substring(commaIndex + 1);
-          }
+    // Try using the image data URI from the annotation JSON directly
+    // (params.annotation.image is already populated by Zotero.Annotations.toJSON)
+    if (annotationJson.image) {
+      imageBase64 = extractBase64FromDataUri(annotationJson.image);
+    }
+
+    // Fall back to toJSON if the JSON didn't include image data
+    if (!imageBase64) {
+      try {
+        const annotationData = await Zotero.Annotations.toJSON(annotation);
+        if (annotationData.image) {
+          imageBase64 = extractBase64FromDataUri(annotationData.image);
         }
+      } catch (e: any) {
+        ztoolkit.log(
+          `[AIOCR] Failed to get annotation image via toJSON: ${e.message}`,
+        );
       }
-    } catch (e: any) {
-      ztoolkit.log(
-        `[AIOCR] Failed to get annotation image via toJSON: ${e.message}`,
-      );
     }
 
     if (!imageBase64) {
@@ -217,6 +273,15 @@ async function handleSingleAnnotationOCR(
   progressWin.startCloseTimer(3000);
 }
 
+function extractBase64FromDataUri(dataUri: string): string | null {
+  if (!dataUri || !dataUri.startsWith("data:")) return null;
+  const commaIndex = dataUri.indexOf(",");
+  if (commaIndex !== -1) {
+    return dataUri.substring(commaIndex + 1);
+  }
+  return null;
+}
+
 function uint8ArrayToBase64(bytes: Uint8Array): string {
   let binary = "";
   const chunkSize = 8192;
@@ -243,7 +308,7 @@ function markdownToHTML(md: string): string {
   html = html.replace(/^---$/gm, "<hr/>");
   html = html.replace(/\n\n/g, "</p><p>");
   html = html.replace(/\n/g, "<br/>");
-  html = `<p>${html}</p>`;;
+  html = `<p>${html}</p>`;
 
   return html;
 }
