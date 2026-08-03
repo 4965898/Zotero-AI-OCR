@@ -4,9 +4,7 @@ import { getString } from "../utils/locale";
 
 export function registerAnnotationOCR() {
   if (typeof Zotero.Reader?.registerEventListener !== "function") {
-    ztoolkit.log(
-      "[AIOCR] Zotero.Reader.registerEventListener not available",
-    );
+    ztoolkit.log("[AIOCR] Zotero.Reader.registerEventListener not available");
     return;
   }
 

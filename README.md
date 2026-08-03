@@ -19,7 +19,7 @@
 
 ## 简介
 
-**AI OCR** 是一款 Zotero 7 插件，支持调用 **PaddleOCR**、**MinerU** 和 **AI 视觉大模型**对 PDF 文档和图片进行 OCR 识别，并将识别结果以 Markdown 笔记的形式附加到 Zotero 条目中。
+**AI OCR** 是一款 Zotero 7/8/9 插件，支持调用 **PaddleOCR**、**MinerU** 和 **AI 视觉大模型**对 PDF 文档和图片进行 OCR 识别，并将识别结果以 Markdown 笔记的形式附加到 Zotero 条目中。
 
 ### 主要特性
 
@@ -40,7 +40,7 @@
 ## 安装
 
 1. 从 [Releases](https://github.com/4965898/Zotero-AI-OCR/releases) 页面下载最新版本的 `.xpi` 文件
-2. 打开 Zotero 7，进入 **工具 → 插件**
+2. 打开 Zotero（支持 Zotero 7 / 8 / 9），进入 **工具 → 插件**
 3. 点击右上角齿轮图标，选择 **Install Add-on From File**
 4. 选择下载的 `.xpi` 文件，确认安装
 5. 重启 Zotero
@@ -249,6 +249,14 @@ addon/
 
 ## 更新日志
 
+### v1.9.3
+
+- 🆕 **Zotero 8/9 兼容** — 扩展支持范围至 Zotero 7 / 8 / 9
+  - `strict_max_version` 从 `8.*` 提升至 `9.*`
+  - 升级 `zotero-plugin-toolkit` 至稳定版 5.2.0（适配 `ZoteroToolkit` 新导入路径）
+  - 升级 `zotero-types` 至稳定版 4.1.3、`zotero-plugin-scaffold` 至 0.8.8
+  - 移除所有 beta 依赖，全面采用稳定版
+
 ### v1.9.2
 
 - 🐛 **修复图片注释 OCR 无响应** — 修复点击 OCR 按钮毫无反应的问题
@@ -298,7 +306,7 @@ addon/
 
 - Node.js >= 18
 - npm >= 9
-- Zotero 7
+- Zotero 7 / 8 / 9
 
 ### 构建与调试
 
