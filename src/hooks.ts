@@ -48,15 +48,20 @@ async function onMainWindowLoad(win: _ZoteroTypes.MainWindow): Promise<void> {
     })
     .show();
 
-  registerContextMenu(win);
+  try {
+    registerContextMenu(win);
 
-  await Zotero.Promise.delay(1000);
+    await new Promise((resolve) => setTimeout(resolve, 1000));
 
-  popupWin.changeLine({
-    progress: 100,
-    text: getString("startup-finish"),
-  });
-  popupWin.startCloseTimer(3000);
+    popupWin.changeLine({
+      progress: 100,
+      text: getString("startup-finish"),
+    });
+  } catch (e) {
+    ztoolkit.log("Startup error:", e);
+  } finally {
+    popupWin.startCloseTimer(3000);
+  }
 }
 
 async function onMainWindowUnload(win: Window): Promise<void> {
