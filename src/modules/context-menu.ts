@@ -46,48 +46,54 @@ function truncateName(name: string, maxLength: number = 40): string {
   return name.substring(0, maxLength - 3) + "...";
 }
 
+/**
+ * 向 Zotero 右键菜单注册菜单项（替代 toolkit 5.2.0 中已移除的 Menu.register）
+ */
+function registerMenuItem(
+  win: _ZoteroTypes.MainWindow,
+  id: string,
+  label: string,
+  icon: string,
+  commandListener: (() => void) | null,
+  isMenu: boolean = false,
+) {
+  const doc = win.document;
+  const popup = doc.getElementById("zotero-itemmenu");
+  if (!popup) {
+    ztoolkit.log(`registerMenuItem: zotero-itemmenu not found for ${id}`);
+    return;
+  }
+
+  // 若已注册则先移除，避免重复
+  const existing = doc.getElementById(id);
+  if (existing) existing.remove();
+
+  const XUL_NS = "http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul";
+  const el = doc.createElementNS(XUL_NS, isMenu ? "menu" : "menuitem") as XUL.Element;
+  el.setAttribute("id", id);
+  el.setAttribute("label", label);
+  if (icon) {
+    el.setAttribute("class", "menuitem-iconic");
+    el.style.listStyleImage = `url(${icon})`;
+  }
+  if (commandListener) {
+    el.addEventListener("command", commandListener);
+  }
+  if (isMenu) {
+    const menupopup = doc.createElementNS(XUL_NS, "menupopup");
+    el.appendChild(menupopup);
+  }
+  popup.appendChild(el);
+}
+
 export function registerContextMenu(win: _ZoteroTypes.MainWindow) {
   const menuIcon = `chrome://aiocr/content/icons/favicon@0.5x.png`;
 
-  ztoolkit.Menu.register("item", {
-    tag: "menuitem",
-    id: "zotero-itemmenu-aiocr-recognize",
-    label: getString("menuitem-ocr"),
-    icon: menuIcon,
-    commandListener: () => handleSingleOCR(),
-  });
-
-  ztoolkit.Menu.register("item", {
-    tag: "menuitem",
-    id: "zotero-itemmenu-aiocr-batch",
-    label: getString("menuitem-batch-ocr"),
-    icon: menuIcon,
-    commandListener: () => handleBatchOCR(),
-  });
-
-  ztoolkit.Menu.register("item", {
-    tag: "menuitem",
-    id: "zotero-itemmenu-aiocr-page-range",
-    label: getString("menuitem-page-range-ocr"),
-    icon: menuIcon,
-    commandListener: () => handlePageRangeOCR(),
-  });
-
-  ztoolkit.Menu.register("item", {
-    tag: "menu",
-    id: "zotero-itemmenu-aiocr-switch-engine",
-    label: getString("menuitem-switch-engine"),
-    icon: menuIcon,
-    children: [],
-  });
-
-  ztoolkit.Menu.register("item", {
-    tag: "menu",
-    id: "zotero-itemmenu-aiocr-advanced",
-    label: getString("menuitem-advanced-options"),
-    icon: menuIcon,
-    children: [],
-  });
+  registerMenuItem(win, "zotero-itemmenu-aiocr-recognize", getString("menuitem-ocr"), menuIcon, () => handleSingleOCR());
+  registerMenuItem(win, "zotero-itemmenu-aiocr-batch", getString("menuitem-batch-ocr"), menuIcon, () => handleBatchOCR());
+  registerMenuItem(win, "zotero-itemmenu-aiocr-page-range", getString("menuitem-page-range-ocr"), menuIcon, () => handlePageRangeOCR());
+  registerMenuItem(win, "zotero-itemmenu-aiocr-switch-engine", getString("menuitem-switch-engine"), menuIcon, null, true);
+  registerMenuItem(win, "zotero-itemmenu-aiocr-advanced", getString("menuitem-advanced-options"), menuIcon, null, true);
 
   refreshEngineMenu();
   refreshAdvancedMenu();
