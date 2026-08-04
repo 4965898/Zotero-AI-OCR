@@ -249,6 +249,15 @@ addon/
 
 ## 更新日志
 
+### v1.9.4
+
+- 🐛 **修复右键菜单消失** — 修复升级 toolkit 5.2.0 后右键菜单不显示的问题
+  - toolkit 5.2.0 完全移除了 `Menu` 类，原 `ztoolkit.Menu.register` 调用全部抛异常
+  - 改用 Zotero 原生 DOM API（`createElementNS`）注册菜单项，恢复全部 5 个右键菜单
+- 🐛 **修复启动提示窗不自动关闭** — 修复启动时进度窗口停留不消失的问题
+  - 用 `try/finally` 确保 `startCloseTimer` 始终执行，避免异常中断导致窗口停留
+  - 替换已废弃的 `Zotero.Promise.delay` 为标准 `setTimeout`
+
 ### v1.9.3
 
 - 🆕 **Zotero 8/9 兼容** — 扩展支持范围至 Zotero 7 / 8 / 9
