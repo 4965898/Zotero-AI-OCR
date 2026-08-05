@@ -12,13 +12,13 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/user/zotero-ai-ocr.git"
+    "url": "git+https://github.com/4965898/Zotero-AI-OCR.git"
   },
   "author": "AIOCR4Zotero",
   "bugs": {
-    "url": "https://github.com/user/zotero-ai-ocr/issues"
+    "url": "https://github.com/4965898/Zotero-AI-OCR/issues"
   },
-  "homepage": "https://github.com/user/zotero-ai-ocr#readme",
+  "homepage": "https://github.com/4965898/Zotero-AI-OCR#readme",
   "license": "AGPL-3.0-or-later",
   "scripts": {
     "start": "zotero-plugin serve",
