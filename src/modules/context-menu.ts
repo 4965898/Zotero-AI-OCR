@@ -3,6 +3,8 @@ import {
   pdfToImages,
   callSyncAPI,
   callAsyncAPI,
+  extractPagesToTempPdf,
+  OCRPageResult,
   ENGINE_ADVANCED_FEATURES,
   ENGINE_MODELS,
   EngineType,
@@ -68,8 +70,12 @@ function registerMenuItem(
   const existing = doc.getElementById(id);
   if (existing) existing.remove();
 
-  const XUL_NS = "http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul";
-  const el = doc.createElementNS(XUL_NS, isMenu ? "menu" : "menuitem") as XUL.Element;
+  const XUL_NS =
+    "http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul";
+  const el = doc.createElementNS(
+    XUL_NS,
+    isMenu ? "menu" : "menuitem",
+  ) as XUL.Element;
   el.setAttribute("id", id);
   el.setAttribute("label", label);
   if (icon) {
@@ -89,11 +95,43 @@ function registerMenuItem(
 export function registerContextMenu(win: _ZoteroTypes.MainWindow) {
   const menuIcon = `chrome://aiocr/content/icons/favicon@0.5x.png`;
 
-  registerMenuItem(win, "zotero-itemmenu-aiocr-recognize", getString("menuitem-ocr"), menuIcon, () => handleSingleOCR());
-  registerMenuItem(win, "zotero-itemmenu-aiocr-batch", getString("menuitem-batch-ocr"), menuIcon, () => handleBatchOCR());
-  registerMenuItem(win, "zotero-itemmenu-aiocr-page-range", getString("menuitem-page-range-ocr"), menuIcon, () => handlePageRangeOCR());
-  registerMenuItem(win, "zotero-itemmenu-aiocr-switch-engine", getString("menuitem-switch-engine"), menuIcon, null, true);
-  registerMenuItem(win, "zotero-itemmenu-aiocr-advanced", getString("menuitem-advanced-options"), menuIcon, null, true);
+  registerMenuItem(
+    win,
+    "zotero-itemmenu-aiocr-recognize",
+    getString("menuitem-ocr"),
+    menuIcon,
+    () => handleSingleOCR(),
+  );
+  registerMenuItem(
+    win,
+    "zotero-itemmenu-aiocr-batch",
+    getString("menuitem-batch-ocr"),
+    menuIcon,
+    () => handleBatchOCR(),
+  );
+  registerMenuItem(
+    win,
+    "zotero-itemmenu-aiocr-page-range",
+    getString("menuitem-page-range-ocr"),
+    menuIcon,
+    () => handlePageRangeOCR(),
+  );
+  registerMenuItem(
+    win,
+    "zotero-itemmenu-aiocr-switch-engine",
+    getString("menuitem-switch-engine"),
+    menuIcon,
+    null,
+    true,
+  );
+  registerMenuItem(
+    win,
+    "zotero-itemmenu-aiocr-advanced",
+    getString("menuitem-advanced-options"),
+    menuIcon,
+    null,
+    true,
+  );
 
   refreshEngineMenu();
   refreshAdvancedMenu();
@@ -800,6 +838,90 @@ async function handlePageRangeOCR() {
   await processPageRangeOCR(attachment, pageNumbers);
 }
 
+function pagesHaveText(pages: OCRPageResult[]): boolean {
+  return pages.some((p) => p.markdown.trim().length > 0);
+}
+
+async function tryOcrPageRangeViaPdfUpload(
+  filePath: string,
+  engine: EngineType,
+  modelConfig: any,
+  pageNumbers: number[],
+  progressWin: any,
+): Promise<OCRPageResult[]> {
+  let tempPdfPath: string | null = null;
+  try {
+    tempPdfPath = await extractPagesToTempPdf(filePath, pageNumbers);
+    const isAsyncOnly = modelConfig.asyncOnly === true;
+    const apiMode = getPref("apiMode") as string;
+    const onProgress = (current: number, total: number) => {
+      progressWin?.changeLine({
+        text: getString("progress-page-range-page", {
+          args: { current: String(current), total: String(total) },
+        }),
+        progress: Math.round((current / Math.max(total, 1)) * 90),
+      });
+    };
+    const pages =
+      isAsyncOnly || apiMode === "async"
+        ? await callAsyncAPI(engine, tempPdfPath, true, onProgress)
+        : await callSyncAPI(engine, tempPdfPath, true);
+    if (pages.length === 0) {
+      throw new Error("OCR result has no pages");
+    }
+    const remapped = pages.map((p, i) => ({
+      ...p,
+      pageNumber: pageNumbers[i] ?? i + 1,
+    }));
+    ztoolkit.log(
+      `[AIOCR] page-range: cropped-PDF flow returned ${remapped.length} page(s), hasText=${pagesHaveText(remapped)}`,
+    );
+    return remapped;
+  } catch (e: any) {
+    ztoolkit.log(
+      `[AIOCR] page-range: cropped-PDF upload failed (${e.message}), will try full-PDF upload`,
+    );
+    return [];
+  } finally {
+    if (tempPdfPath) {
+      try {
+        await IOUtils.remove(tempPdfPath, { ignoreAbsent: true });
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
+
+async function ocrPageRangeViaFullPdf(
+  filePath: string,
+  engine: EngineType,
+  modelConfig: any,
+  pageNumbers: number[],
+  progressWin: any,
+): Promise<OCRPageResult[]> {
+  const isAsyncOnly = modelConfig.asyncOnly === true;
+  const apiMode = getPref("apiMode") as string;
+  const onProgress = (current: number, total: number) => {
+    progressWin?.changeLine({
+      text: getString("progress-page-range-page", {
+        args: { current: String(current), total: String(total) },
+      }),
+      progress: Math.round((current / Math.max(total, 1)) * 90),
+    });
+  };
+  const allPages =
+    isAsyncOnly || apiMode === "async"
+      ? await callAsyncAPI(engine, filePath, true, onProgress)
+      : await callSyncAPI(engine, filePath, true);
+  const requested = new Set(pageNumbers);
+  const filtered = allPages.filter((p) => requested.has(p.pageNumber));
+  ztoolkit.log(
+    `[AIOCR] page-range: full-PDF flow returned ${allPages.length} page(s), kept ${filtered.length} requested page(s), hasText=${pagesHaveText(filtered)}`,
+  );
+  return filtered;
+}
+
 async function processPageRangeOCR(
   attachment: Zotero.Item,
   pageNumbers: number[],
@@ -824,77 +946,107 @@ async function processPageRangeOCR(
     const isPaddleOCR =
       modelConfig && (modelConfig as any).platform === "paddleocr";
 
-    const images = await pdfToImages(
-      filePath,
-      undefined,
-      attachment.id,
-      pageNumbers,
-    );
-
-    if (images.length === 0) {
-      throw new Error("No pages rendered");
-    }
-
     const allMarkdownParts: string[] = [];
-    const totalImages = images.length;
 
-    for (let i = 0; i < totalImages; i++) {
-      const img = images[i];
-
-      progressWin.changeLine({
-        text: getString("progress-page-range-page", {
-          args: {
-            current: String(i + 1),
-            total: String(totalImages),
-          },
-        }),
-        progress: Math.round(((i + 1) / totalImages) * 100),
-      });
-
-      const tempDir = PathUtils.join(PathUtils.tempDir, "aiocr-pagerange");
-      await IOUtils.makeDirectory(tempDir, { ignoreExisting: true });
-      const tempPath = PathUtils.join(
-        tempDir,
-        `page-${img.pageNumber}-${Date.now()}.png`,
+    if (isPaddleOCR) {
+      let pages = await tryOcrPageRangeViaPdfUpload(
+        filePath,
+        engine as EngineType,
+        modelConfig,
+        pageNumbers,
+        progressWin,
       );
 
-      try {
-        const binaryString = atob(img.base64);
-        const bytes = new Uint8Array(binaryString.length);
-        for (let j = 0; j < binaryString.length; j++) {
-          bytes[j] = binaryString.charCodeAt(j);
-        }
-        await IOUtils.write(tempPath, bytes);
+      if (!pagesHaveText(pages)) {
+        ztoolkit.log(
+          "[AIOCR] page-range: cropped-PDF flow produced no text, uploading the original PDF and filtering pages",
+        );
+        pages = await ocrPageRangeViaFullPdf(
+          filePath,
+          engine as EngineType,
+          modelConfig,
+          pageNumbers,
+          progressWin,
+        );
+      }
 
-        let pageMarkdown = "";
+      for (const p of pages) {
+        allMarkdownParts.push(`## Page ${p.pageNumber}\n\n${p.markdown}`);
+      }
+    }
 
-        if (isPaddleOCR) {
-          const isAsyncOnly = (modelConfig as any).asyncOnly === true;
-          const pages = isAsyncOnly
-            ? await callAsyncAPI(engine as EngineType, tempPath, false)
-            : await callSyncAPI(engine as EngineType, tempPath, false);
-          pageMarkdown = pages.map((p) => p.markdown).join("\n");
-        } else {
-          const result = await performOCR(
-            tempPath,
-            false,
-            undefined,
-            undefined,
-            attachment.id,
-          );
-          if (result.pages.length > 0) {
-            pageMarkdown = result.pages.map((p) => p.markdown).join("\n");
-          } else {
-            pageMarkdown = result.fullMarkdown;
-          }
-        }
+    if (allMarkdownParts.length === 0) {
+      const images = await pdfToImages(
+        filePath,
+        undefined,
+        attachment.id,
+        pageNumbers,
+      );
 
-        allMarkdownParts.push(`## Page ${img.pageNumber}\n\n${pageMarkdown}`);
-      } finally {
+      if (images.length === 0) {
+        throw new Error("No pages rendered");
+      }
+
+      const totalImages = images.length;
+
+      for (let i = 0; i < totalImages; i++) {
+        const img = images[i];
+
+        progressWin.changeLine({
+          text: getString("progress-page-range-page", {
+            args: {
+              current: String(i + 1),
+              total: String(totalImages),
+            },
+          }),
+          progress: Math.round(((i + 1) / totalImages) * 100),
+        });
+
+        const tempDir = PathUtils.join(PathUtils.tempDir, "aiocr-pagerange");
+        await IOUtils.makeDirectory(tempDir, { ignoreExisting: true });
+        const tempPath = PathUtils.join(
+          tempDir,
+          `page-${img.pageNumber}-${Date.now()}.png`,
+        );
+
         try {
-          await IOUtils.remove(tempPath, { ignoreAbsent: true });
-        } catch {
-          /* ignore */
+          const binaryString = atob(img.base64);
+          const bytes = new Uint8Array(binaryString.length);
+          for (let j = 0; j < binaryString.length; j++) {
+            bytes[j] = binaryString.charCodeAt(j);
+          }
+          await IOUtils.write(tempPath, bytes);
+
+          let pageMarkdown = "";
+
+          if (isPaddleOCR) {
+            const isAsyncOnly = (modelConfig as any).asyncOnly === true;
+            const pages = isAsyncOnly
+              ? await callAsyncAPI(engine as EngineType, tempPath, false)
+              : await callSyncAPI(engine as EngineType, tempPath, false);
+            pageMarkdown = pages.map((p) => p.markdown).join("\n");
+          } else {
+            const result = await performOCR(
+              tempPath,
+              false,
+              undefined,
+              undefined,
+              attachment.id,
+            );
+            if (result.pages.length > 0) {
+              pageMarkdown = result.pages.map((p) => p.markdown).join("\n");
+            } else {
+              pageMarkdown = result.fullMarkdown;
+            }
+          }
+
+          allMarkdownParts.push(`## Page ${img.pageNumber}\n\n${pageMarkdown}`);
+        } finally {
+          try {
+            await IOUtils.remove(tempPath, { ignoreAbsent: true });
+          } catch {
+            /* ignore */
+          }
         }
       }
     }
@@ -946,15 +1098,15 @@ export async function processOCRForAttachment(
   const progressWin = silent
     ? null
     : new ztoolkit.ProgressWindow(addon.data.config.addonName, {
-      closeOnClick: true,
-      closeTime: -1,
-    })
-      .createLine({
-        text: getString("progress-ocr-start"),
-        type: "default",
-        progress: 0,
+        closeOnClick: true,
+        closeTime: -1,
       })
-      .show();
+        .createLine({
+          text: getString("progress-ocr-start"),
+          type: "default",
+          progress: 0,
+        })
+        .show();
 
   try {
     const filePath = await attachment.getFilePathAsync();

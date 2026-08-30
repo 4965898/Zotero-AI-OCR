@@ -6,6 +6,7 @@ import {
   CustomEngineConfig,
 } from "../utils/prefs";
 import { getString } from "../utils/locale";
+import { PDFDocument } from "pdf-lib";
 
 export const AI_PROVIDER_CONFIGS: {
   [provider: string]: {
@@ -447,6 +448,36 @@ function uint8ArrayToBase64(bytes: Uint8Array): string {
 async function readFileAsBase64(filePath: string): Promise<string> {
   const bytes = await IOUtils.read(filePath);
   return uint8ArrayToBase64(bytes);
+}
+
+export async function extractPagesToTempPdf(
+  filePath: string,
+  pageNumbers: number[],
+): Promise<string> {
+  const bytes = await IOUtils.read(filePath);
+  const srcDoc = await PDFDocument.load(bytes, { ignoreEncryption: true });
+  if (srcDoc.isEncrypted) {
+    throw new Error(
+      "source PDF is encrypted; pdf-lib cannot decrypt content streams, cropped pages would be blank",
+    );
+  }
+  const outDoc = await PDFDocument.create();
+  const copiedPages = await outDoc.copyPages(
+    srcDoc,
+    pageNumbers.map((p) => p - 1),
+  );
+  for (const page of copiedPages) {
+    outDoc.addPage(page);
+  }
+  const outBytes = await outDoc.save();
+  const tempDir = PathUtils.join(PathUtils.tempDir, "aiocr-pagerange");
+  await IOUtils.makeDirectory(tempDir, { ignoreExisting: true });
+  const tempPath = PathUtils.join(
+    tempDir,
+    `pages-${pageNumbers[0]}-${pageNumbers[pageNumbers.length - 1]}-${Date.now()}.pdf`,
+  );
+  await IOUtils.write(tempPath, outBytes);
+  return tempPath;
 }
 
 function buildSyncPayload(
@@ -1091,6 +1122,14 @@ function extractPdfJsFromReader(reader: any): any {
 
 function getIframeWindow(reader: any): any {
   try {
+    const internal = reader._internalReader || reader._internal;
+    if (internal?._primaryView?._iframeWindow) {
+      return internal._primaryView._iframeWindow;
+    }
+  } catch {
+    /* ignore */
+  }
+  try {
     const iw = reader._iframeWindow;
     if (iw) return iw;
   } catch {
@@ -1407,9 +1446,9 @@ async function renderPdfChrome(
     pageNumbers && pageNumbers.length > 0
       ? pageNumbers.filter((p) => p >= 1 && p <= doc.numPages)
       : Array.from(
-        { length: Math.min(doc.numPages, MAX_AI_PDF_PAGES) },
-        (_, i) => i + 1,
-      );
+          { length: Math.min(doc.numPages, MAX_AI_PDF_PAGES) },
+          (_, i) => i + 1,
+        );
   ztoolkit.log(
     `[AIOCR] renderPdfChrome: doc.numPages=${doc.numPages}, rendering ${pagesToRender.length} pages`,
   );
@@ -1550,9 +1589,9 @@ async function renderPdfCrossCompartment(
     pageNumbers && pageNumbers.length > 0
       ? pageNumbers.filter((p) => p >= 1 && p <= waivedDoc.numPages)
       : Array.from(
-        { length: Math.min(waivedDoc.numPages, MAX_AI_PDF_PAGES) },
-        (_, i) => i + 1,
-      );
+          { length: Math.min(waivedDoc.numPages, MAX_AI_PDF_PAGES) },
+          (_, i) => i + 1,
+        );
   ztoolkit.log(
     `[AIOCR] renderPdfCrossCompartment: doc.numPages=${waivedDoc.numPages}, rendering ${pagesToRender.length} pages`,
   );
