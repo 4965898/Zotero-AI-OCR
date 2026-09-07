@@ -150,6 +150,43 @@ function getEffectivePrompt(defaultPrompt: string): string {
 
 const MAX_AI_PDF_PAGES = 50;
 
+/**
+ * 各平台"关闭模型思考"的请求参数。
+ * 思考型模型（豆包/智谱/Qwen3 等）会把推理过程混入 OCR 结果且浪费 token，
+ * 对支持该参数的平台直接关闭；不支持的平台由 stripThinkingContent 兜底剥离。
+ */
+const THINKING_DISABLED_PARAMS: { [provider: string]: Record<string, any> } = {
+  doubao: { thinking: { type: "disabled" } },
+  zhipu: { thinking: { type: "disabled" } },
+  alibaba: { enable_thinking: false },
+  siliconflow: { enable_thinking: false },
+  openrouter: { reasoning: { enabled: false, exclude: true } },
+};
+
+/**
+ * 剥离模型输出中混入的思考内容：
+ * 1. 完整的 think 思考块（可能多块）
+ * 2. 未闭合的思考块（开标签到结尾整体丢弃）
+ * 3. 解开 answer 标签包裹（部分思考型模型的正文格式）
+ * 注：正则中的标签字符用 \u003C 转义书写，避免被工具链误解析
+ */
+function stripThinkingContent(text: string): string {
+  if (!text) return text;
+  const thinkBlockRe = new RegExp(
+    "\\u003Cthink\\u003E[\\s\\S]*?\\u003C/think\\u003E",
+    "gi",
+  );
+  const thinkUnclosedRe = new RegExp("\\u003Cthink\\u003E[\\s\\S]*$", "i");
+  const answerRe = new RegExp(
+    "\\u003Canswer\\u003E([\\s\\S]*?)\\u003C/answer\\u003E",
+    "gi",
+  );
+  let result = text.replace(thinkBlockRe, "");
+  result = result.replace(thinkUnclosedRe, "");
+  result = result.replace(answerRe, "$1");
+  return result.trim();
+}
+
 export const ENGINE_MODELS = {
   "PP-OCRv6": {
     name: "PP-OCRv6",
@@ -2015,6 +2052,7 @@ async function renderPdfIframeSandbox(
 
 async function callAIOneImage(
   providerConfig: (typeof AI_PROVIDER_CONFIGS)[string],
+  provider: string,
   apiKey: string,
   model: string,
   apiBase: string,
@@ -2048,84 +2086,111 @@ async function callAIOneImage(
     if (data.error) throw new Error(data.error.message || "Gemini API error");
     const candidates = data.candidates || [];
     if (candidates.length > 0 && candidates[0].content?.parts?.length > 0) {
-      markdown = candidates[0].content.parts
-        .map((p: any) => p.text || "")
-        .join("\n");
+      // 过滤思考 parts（thought: true），再合并正文
+      markdown = stripThinkingContent(
+        candidates[0].content.parts
+          .filter((p: any) => !p.thought)
+          .map((p: any) => p.text || "")
+          .join("\n"),
+      );
     }
   } else {
     const baseUrl = apiBase.replace(/\/+$/, "");
     const url = `${baseUrl}/chat/completions`;
-    const requestBody: Record<string, any> = {
-      model,
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "text", text: prompt },
-            {
-              type: "image_url",
-              image_url: {
-                url: `data:${mimeType};base64,${imageBase64}`,
+    const thinkingDisabled = THINKING_DISABLED_PARAMS[provider];
+
+    const attempt = async (withThinkingDisabled: boolean): Promise<string> => {
+      const requestBody: Record<string, any> = {
+        model,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: prompt },
+              {
+                type: "image_url",
+                image_url: {
+                  url: `data:${mimeType};base64,${imageBase64}`,
+                },
               },
-            },
-          ],
-        },
-      ],
+            ],
+          },
+        ],
+      };
+      requestBody[providerConfig.tokenParam || "max_tokens"] =
+        providerConfig.maxTokens || 4096;
+      requestBody.temperature =
+        providerConfig.temperature !== undefined
+          ? providerConfig.temperature
+          : 0.1;
+      if (providerConfig.streamParam !== undefined) {
+        requestBody.stream = providerConfig.streamParam;
+      }
+      if (withThinkingDisabled && thinkingDisabled) {
+        Object.assign(requestBody, thinkingDisabled);
+      }
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (apiKey) {
+        if (providerConfig.authHeaderFormat === "api-key") {
+          headers["api-key"] = apiKey;
+        } else {
+          headers["Authorization"] = `Bearer ${apiKey}`;
+        }
+      }
+      const response = await Zotero.HTTP.request("POST", url, {
+        body: JSON.stringify(requestBody),
+        headers,
+        responseType: "json",
+        timeout: 300000,
+      });
+      const data = response.response;
+      if (data.error) {
+        const errMsg = data.error.message || "API error";
+        const errType = data.error.type || "";
+        const errCode = data.error.code || "";
+        if (
+          errCode === "insufficient_quota" ||
+          errMsg.includes("quota") ||
+          errMsg.includes("billing")
+        ) {
+          throw new Error(
+            `API 配额不足：${errMsg}\n请检查您的 ${providerConfig.name} 账户余额和计费状态。`,
+          );
+        }
+        if (
+          errMsg.includes("model") ||
+          errMsg.includes("not found") ||
+          errMsg.includes("does not exist")
+        ) {
+          throw new Error(
+            `模型不可用：${errMsg}\n请检查模型名称是否正确。${providerConfig.modelHint ? "\n" + providerConfig.modelHint : ""}`,
+          );
+        }
+        throw new Error(errMsg);
+      }
+      const choices = data.choices || [];
+      if (choices.length > 0 && choices[0].message?.content) {
+        return choices[0].message.content;
+      }
+      return "";
     };
-    requestBody[providerConfig.tokenParam || "max_tokens"] =
-      providerConfig.maxTokens || 4096;
-    requestBody.temperature =
-      providerConfig.temperature !== undefined
-        ? providerConfig.temperature
-        : 0.1;
-    if (providerConfig.streamParam !== undefined) {
-      requestBody.stream = providerConfig.streamParam;
-    }
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
-    if (apiKey) {
-      if (providerConfig.authHeaderFormat === "api-key") {
-        headers["api-key"] = apiKey;
+
+    try {
+      markdown = await attempt(true);
+    } catch (e: any) {
+      if (thinkingDisabled) {
+        // 部分平台/模型不支持关闭思考参数，去掉参数重试一次
+        ztoolkit.log(
+          `[AIOCR] callAIOneImage: request with thinking-disable params failed (${e.message}), retrying without them`,
+        );
+        markdown = await attempt(false);
       } else {
-        headers["Authorization"] = `Bearer ${apiKey}`;
+        throw e;
       }
     }
-    const response = await Zotero.HTTP.request("POST", url, {
-      body: JSON.stringify(requestBody),
-      headers,
-      responseType: "json",
-      timeout: 300000,
-    });
-    const data = response.response;
-    if (data.error) {
-      const errMsg = data.error.message || "API error";
-      const errType = data.error.type || "";
-      const errCode = data.error.code || "";
-      if (
-        errCode === "insufficient_quota" ||
-        errMsg.includes("quota") ||
-        errMsg.includes("billing")
-      ) {
-        throw new Error(
-          `API 配额不足：${errMsg}\n请检查您的 ${providerConfig.name} 账户余额和计费状态。`,
-        );
-      }
-      if (
-        errMsg.includes("model") ||
-        errMsg.includes("not found") ||
-        errMsg.includes("does not exist")
-      ) {
-        throw new Error(
-          `模型不可用：${errMsg}\n请检查模型名称是否正确。${providerConfig.modelHint ? "\n" + providerConfig.modelHint : ""}`,
-        );
-      }
-      throw new Error(errMsg);
-    }
-    const choices = data.choices || [];
-    if (choices.length > 0 && choices[0].message?.content) {
-      markdown = choices[0].message.content;
-    }
+    markdown = stripThinkingContent(markdown);
   }
 
   return markdown;
@@ -2243,7 +2308,9 @@ async function callCustomOneImage(
     if (data.error) throw new Error(data.error.message || "Gemini API error");
     const candidates = data.candidates || [];
     if (candidates.length > 0 && candidates[0].content?.parts?.length > 0) {
+      // 过滤思考 parts（thought: true），再合并正文
       markdown = candidates[0].content.parts
+        .filter((p: any) => !p.thought)
         .map((p: any) => p.text || "")
         .join("\n");
     }
@@ -2290,7 +2357,8 @@ async function callCustomOneImage(
     }
   }
 
-  return markdown;
+  // 自定义引擎同样剥离思考内容
+  return stripThinkingContent(markdown);
 }
 
 function isGeminiUrl(url: string): boolean {
@@ -2326,6 +2394,7 @@ async function callAIVisionAPI(
       if (onProgress) onProgress(i + 1, images.length);
       const markdown = await callAIOneImage(
         providerConfig,
+        provider,
         apiKey,
         model,
         apiBase,
@@ -2358,6 +2427,7 @@ async function callAIVisionAPI(
   if (onProgress) onProgress(0, 1);
   const markdown = await callAIOneImage(
     providerConfig,
+    provider,
     apiKey,
     model,
     apiBase,
