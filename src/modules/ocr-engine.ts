@@ -1237,6 +1237,119 @@ async function loadPdfJsDirect(): Promise<any> {
   return null;
 }
 
+async function waitForPdfDocument(
+  iframeWindow: any,
+  timeoutMs = 20000,
+): Promise<any> {
+  const Cu = (Components as any).utils;
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const pva =
+        iframeWindow?.PDFViewerApplication ||
+        iframeWindow?.wrappedJSObject?.PDFViewerApplication;
+      if (pva) {
+        let doc = null;
+        try {
+          doc = pva.pdfDocument;
+        } catch {
+          /* ignore */
+        }
+        if (!doc) {
+          try {
+            doc = Cu.waiveXrays(pva).pdfDocument;
+          } catch {
+            /* ignore */
+          }
+        }
+        if (doc) return doc;
+      }
+    } catch {
+      /* ignore */
+    }
+    await Zotero.Promise.delay(500);
+  }
+  return null;
+}
+
+/**
+ * 直接复用 Reader 中 pdf.js viewer 已加载的文档对象（PDFViewerApplication.pdfDocument）渲染页面。
+ *
+ * 这是对加密 PDF（如读秀/超星扫描件，空用户口令加密）唯一可靠的渲染方式：
+ * viewer 打开文档时已完成解密，其 pdfDocument 与屏幕上显示的内容完全一致；
+ * 而 getDocument({data}) 重新解析加密字节流可能产出空白内容。
+ */
+async function renderPagesFromLoadedDocument(
+  iframeWindow: any,
+  pageNumbers?: number[],
+  onProgress?: (current: number, total: number) => void,
+): Promise<{ base64: string; pageNumber: number }[]> {
+  const Cu = (Components as any).utils;
+  const doc = await waitForPdfDocument(iframeWindow);
+  if (!doc) {
+    throw new Error("PDFViewerApplication.pdfDocument not ready");
+  }
+  const waivedDoc = Cu.waiveXrays(doc);
+  const numPages = waivedDoc.numPages;
+  if (!numPages || numPages < 1) {
+    throw new Error(`invalid numPages: ${numPages}`);
+  }
+  const pagesToRender =
+    pageNumbers && pageNumbers.length > 0
+      ? pageNumbers.filter((p) => p >= 1 && p <= numPages)
+      : Array.from(
+          { length: Math.min(numPages, MAX_AI_PDF_PAGES) },
+          (_, i) => i + 1,
+        );
+  if (pagesToRender.length === 0) {
+    throw new Error(`no pages to render (numPages=${numPages})`);
+  }
+  ztoolkit.log(
+    `[AIOCR] renderPagesFromLoadedDocument: doc.numPages=${numPages}, rendering ${pagesToRender.length} pages`,
+  );
+
+  const images: { base64: string; pageNumber: number }[] = [];
+  for (let idx = 0; idx < pagesToRender.length; idx++) {
+    const pageNum = pagesToRender[idx];
+    const page = await waivedDoc.getPage(pageNum);
+    const waivedPage = Cu.waiveXrays(page);
+
+    const vpOpts = new iframeWindow.Object();
+    vpOpts.scale = 2;
+    const viewport = waivedPage.getViewport(vpOpts);
+    const waivedViewport = Cu.waiveXrays(viewport);
+    const vpWidth = waivedViewport.width;
+    const vpHeight = waivedViewport.height;
+    if (!vpWidth || !vpHeight || isNaN(vpWidth) || isNaN(vpHeight)) {
+      throw new Error(
+        `Page ${pageNum} viewport is invalid (${vpWidth}x${vpHeight})`,
+      );
+    }
+
+    const canvas = iframeWindow.document.createElement("canvas");
+    canvas.width = vpWidth;
+    canvas.height = vpHeight;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    const renderOpts = new iframeWindow.Object();
+    renderOpts.canvasContext = ctx;
+    renderOpts.viewport = waivedViewport;
+
+    await waivedPage.render(renderOpts).promise;
+
+    const dataUrl = canvas.toDataURL("image/png");
+    images.push({ base64: dataUrl.split(",")[1], pageNumber: pageNum });
+
+    ztoolkit.log(
+      `[AIOCR] renderPagesFromLoadedDocument: page ${pageNum} (${idx + 1}/${pagesToRender.length}) rendered, base64 length=${dataUrl.length}`,
+    );
+    if (onProgress) onProgress(idx + 1, pagesToRender.length);
+  }
+  return images;
+}
+
 export async function pdfToImages(
   filePath: string,
   onProgress?: (current: number, total: number) => void,
@@ -1250,6 +1363,8 @@ export async function pdfToImages(
     // 优先尝试从 Reader 获取 pdf.js（在 HTML iframe 中渲染，CMap 字体支持更完善）
     let pdfjsLib: any = null;
     let iframeWindow: any = null;
+    // 目标 PDF 所在 Reader 的 iframe 窗口（用于复用已加载的 pdfDocument 渲染）
+    let targetIframeWindow: any = null;
 
     if (itemId) {
       const existingReaders = getReaders();
@@ -1257,15 +1372,16 @@ export async function pdfToImages(
         try {
           const readerItemId = reader._item?.id || reader.itemID;
           if (readerItemId === itemId) {
+            targetIframeWindow = getIframeWindow(reader);
             const lib = extractPdfJsFromReader(reader);
             if (lib) {
               pdfjsLib = lib;
-              iframeWindow = getIframeWindow(reader);
+              iframeWindow = targetIframeWindow;
               ztoolkit.log(
                 "[AIOCR] pdfToImages: got pdfjsLib from existing reader for this item",
               );
-              break;
             }
+            break;
           }
         } catch {
           /* ignore */
@@ -1273,7 +1389,7 @@ export async function pdfToImages(
       }
     }
 
-    if (!pdfjsLib && itemId) {
+    if (!targetIframeWindow && itemId) {
       ztoolkit.log(
         "[AIOCR] pdfToImages: opening background reader for pdfjsLib...",
       );
@@ -1289,24 +1405,38 @@ export async function pdfToImages(
 
         const result = await (async () => {
           for (let i = 0; i < 40; i++) {
-            const extracted = extractPdfJsFromReader(openedReader);
-            if (extracted) {
-              return {
-                lib: extracted,
-                win: getIframeWindow(openedReader),
-              };
+            const win = getIframeWindow(openedReader);
+            const extracted = win ? extractPdfJsFromReader(openedReader) : null;
+            let docReady = false;
+            if (win) {
+              try {
+                const pva =
+                  win.PDFViewerApplication ||
+                  win.wrappedJSObject?.PDFViewerApplication;
+                docReady = !!pva?.pdfDocument;
+              } catch {
+                /* ignore */
+              }
+            }
+            // pdfjsLib 或 pdfDocument 任一就绪即可继续（优先级0路径不依赖 pdfjsLib）
+            if (extracted || docReady) {
+              return { lib: extracted, win };
             }
             await Zotero.Promise.delay(500);
           }
           return null;
         })();
 
-        if (result) {
+        if (result?.win) {
           pdfjsLib = result.lib;
           iframeWindow = result.win;
+          targetIframeWindow = result.win;
           ztoolkit.log(
-            "[AIOCR] pdfToImages: got pdfjsLib from background reader",
+            `[AIOCR] pdfToImages: reader ready (pdfjsLib=${!!result.lib}), continuing`,
           );
+        } else {
+          // 兜底：viewer iframe 至少应存在，交给 waitForPdfDocument 轮询
+          targetIframeWindow = getIframeWindow(openedReader);
         }
       } catch (e: any) {
         ztoolkit.log(
@@ -1331,6 +1461,29 @@ export async function pdfToImages(
         } catch {
           /* ignore */
         }
+      }
+    }
+
+    // 优先级0：直接渲染目标 Reader 已加载的 pdfDocument（viewer 已完成解密，
+    // 与屏幕显示完全一致，是加密 PDF 唯一可靠的渲染方式）
+    if (targetIframeWindow) {
+      try {
+        ztoolkit.log(
+          "[AIOCR] pdfToImages: trying loaded-document rendering (PDFViewerApplication.pdfDocument)...",
+        );
+        const images = await renderPagesFromLoadedDocument(
+          targetIframeWindow,
+          pageNumbers,
+          onProgress,
+        );
+        ztoolkit.log(
+          `[AIOCR] pdfToImages: loaded-document rendering succeeded, ${images.length} pages`,
+        );
+        return images;
+      } catch (e: any) {
+        ztoolkit.log(
+          `[AIOCR] pdfToImages: loaded-document rendering failed: ${e.message}, trying getDocument approaches...`,
+        );
       }
     }
 

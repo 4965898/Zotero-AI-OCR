@@ -249,6 +249,15 @@ addon/
 
 ## 更新日志
 
+### v1.9.6
+
+- 🐛 **修复 AI 视觉模型整本识别返回"空白图片"** — 修复使用 AI 视觉模型引擎（浦源书生、豆包等）识别 PDF 时，所有页面被识别为"这是一张空白的纯白色图片"的问题
+  - **根因**：PDF 页面渲染走的 `getDocument({data})` 重新解析路径，对加密 PDF（读秀/超星扫描件）会静默产出空白图片；AI 模型只是如实描述了收到的空白图
+  - **修复方案**：改为直接复用 Zotero 阅读器中 pdf.js viewer 已加载的文档对象（`PDFViewerApplication.pdfDocument`）渲染页面——viewer 打开时已完成解密，渲染结果与屏幕显示完全一致
+  - 该方案作为最高优先级渲染路径，原有的 getDocument、iframe sandbox、chrome compartment 三级回退全部保留
+  - 同时惠及：AI 引擎指定页识别的逐页渲染兜底、自定义引擎的 PDF 识别
+- ⚡ 后台 Reader 的等待逻辑优化：pdfDocument 就绪即继续，不再干等 pdfjsLib
+
 ### v1.9.5
 
 - 🐛 **修复"识别指定页面"返回空内容** — 修复 PaddleOCR 引擎识别指定页面后，笔记仅有页码标题而无正文的问题
