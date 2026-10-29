@@ -18,6 +18,8 @@ jobs:
         uses: zotero-plugin-dev/workflows/setup-js@main
       - name: Run Lint
         run: npm run lint:check
+      - name: Typecheck
+        run: npx tsc --noEmit
 
   build:
     runs-on: ubuntu-latest

@@ -1,7 +1,7 @@
 import {
   getPref,
   getActiveEndpoint,
-  getEnabledAdvancedFeatures,
+  getAdvancedFeaturesForEngine,
   getCustomEngineById,
   CustomEngineConfig,
 } from "../utils/prefs";
@@ -89,12 +89,6 @@ export const AI_PROVIDER_CONFIGS: {
     maxTokens: 5000,
     temperature: 0.2,
   },
-  infinigence: {
-    name: "无问芯穹",
-    apiBase: "https://cloud.infini-ai.com/maas/v1",
-    defaultModel: "Qwen/Qwen3-VL-235B-A22B-Instruct",
-    apiFormat: "openai",
-  },
   mistral: {
     name: "Mistral AI",
     apiBase: "https://api.mistral.ai/v1",
@@ -111,7 +105,7 @@ export const AI_PROVIDER_CONFIGS: {
   },
   intern: {
     name: "浦源书生",
-    apiBase: "https://chat.intern-ai.org.cn/api/v1",
+    apiBase: "https://discovery-api.intern-ai.org.cn/v1",
     defaultModel: "internvl3.5-241b-a28b",
     apiFormat: "openai",
   },
@@ -187,6 +181,137 @@ function stripThinkingContent(text: string): string {
   return result.trim();
 }
 
+/* ============================== 任务取消 ============================== */
+
+/** OCR 任务被用户取消时抛出的错误，顶层处理器据此显示"已取消"而非"失败" */
+export class OcrCancelledError extends Error {
+  constructor() {
+    super("OCR cancelled");
+    this.name = "OcrCancelledError";
+  }
+}
+
+let ocrCancelRequested = false;
+
+export function requestOcrCancellation() {
+  ocrCancelRequested = true;
+}
+
+export function isOcrCancelled() {
+  return ocrCancelRequested;
+}
+
+/** 顶层任务处理器在开始新一轮识别时调用，避免上一轮的取消请求影响新一轮 */
+export function resetOcrCancellation() {
+  ocrCancelRequested = false;
+}
+
+function throwIfCancelled() {
+  if (ocrCancelRequested) throw new OcrCancelledError();
+}
+
+/* ============================ HTTP 重试与错误提示 ============================ */
+
+/** 可自动重试的 HTTP 状态码：限流与瞬时服务端错误 */
+const RETRYABLE_STATUS_RE = /status code (429|500|502|503|504)\b/;
+/** 可自动重试的网络层错误 */
+const NETWORK_ERROR_RE = /NetworkError|NS_ERROR|Failed to fetch/i;
+
+function isRetryableHttpError(e: any): boolean {
+  const msg = (e && e.message) || String(e);
+  return RETRYABLE_STATUS_RE.test(msg) || NETWORK_ERROR_RE.test(msg);
+}
+
+/**
+ * 带自动重试的 HTTP 请求：429/5xx/网络错误自动退避重试。
+ * GET 默认重试 2 次；POST 默认 1 次（服务端可能已建任务，不宜多次重复提交）。
+ */
+async function httpRequestWithRetry(
+  method: "GET" | "POST",
+  url: string,
+  options: any,
+  maxRetries?: number,
+): Promise<any> {
+  const retries = maxRetries ?? (method === "GET" ? 2 : 1);
+  let attempt = 0;
+  for (;;) {
+    throwIfCancelled();
+    try {
+      return await Zotero.HTTP.request(method, url, options);
+    } catch (e: any) {
+      attempt++;
+      if (!isRetryableHttpError(e) || attempt > retries) throw e;
+      const delayMs = attempt === 1 ? 2000 : 5000;
+      ztoolkit.log(
+        `[AIOCR] HTTP ${method} ${url} failed (${e.message}), retrying in ${delayMs}ms (${attempt}/${retries})`,
+      );
+      await Zotero.Promise.delay(delayMs);
+    }
+  }
+}
+
+/**
+ * 把 HTTP 状态码异常转换为面向用户的可操作提示。
+ * Zotero.HTTP.request 对非 2xx 响应直接抛 "HTTP POST ... failed with status code N"，
+ * 响应体里的 error.message 拿不到，只能按状态码映射常见原因。
+ */
+function describeHttpError(e: any, service: string): Error {
+  if (e instanceof OcrCancelledError) return e;
+  const msg = (e && e.message) || String(e);
+  const statusMatch = msg.match(/status code (\d+)/);
+  if (statusMatch) {
+    const status = statusMatch[1];
+    if (status === "401" || status === "403") {
+      return new Error(
+        `${service} API 认证失败（HTTP ${status}）：请检查 API Key / Token 是否正确。`,
+      );
+    }
+    if (status === "402") {
+      return new Error(
+        `${service} API 返回 402：账号余额或额度不足，请登录平台确认计费状态。`,
+      );
+    }
+    if (status === "404") {
+      return new Error(
+        `${service} API 返回 404：API 地址或模型不存在，请检查 API 地址与模型名称。`,
+      );
+    }
+    if (status === "413") {
+      return new Error(`${service} API 返回 413：文件过大，请压缩后重试。`);
+    }
+    if (status === "429") {
+      return new Error(
+        `${service} API 返回 429：请求过于频繁（触发限流），请稍后重试或调低批量并发数。`,
+      );
+    }
+    if (status.startsWith("5")) {
+      return new Error(
+        `${service} 服务暂时不可用（HTTP ${status}），已自动重试仍失败，请稍后再试。`,
+      );
+    }
+  }
+  return e instanceof Error ? e : new Error(msg);
+}
+
+/**
+ * 读取引擎高级功能的完整配置：以 ENGINE_ADVANCED_FEATURES 默认值为底，
+ * 叠加用户显式保存的值（含 false）。必须显式传布尔值——服务端默认 true 的
+ * 开关（如 MinerU enable_formula、面壁 upright）若省略字段则永远关不掉。
+ */
+function getResolvedAdvancedFeatures(engine: EngineType): {
+  [feature: string]: boolean;
+} {
+  const result: { [feature: string]: boolean } = {};
+  for (const f of ENGINE_ADVANCED_FEATURES[engine] || []) {
+    result[f.key] = f.defaultValue;
+  }
+  const saved = getAdvancedFeaturesForEngine(engine);
+  for (const [key, val] of Object.entries(saved)) {
+    if (key in result) result[key] = val;
+  }
+  return result;
+}
+
 export const ENGINE_MODELS = {
   "PP-OCRv6": {
     name: "PP-OCRv6",
@@ -195,6 +320,7 @@ export const ENGINE_MODELS = {
     asyncModelName: "PP-OCRv6",
     responseType: "ocrResults",
     asyncOnly: true,
+    defaultEndpoint: "https://paddleocr.aistudio-app.com",
   },
   "PP-StructureV3": {
     name: "PP-StructureV3",
@@ -203,6 +329,7 @@ export const ENGINE_MODELS = {
     asyncModelName: "PP-StructureV3",
     responseType: "layoutParsingResults",
     asyncOnly: true,
+    defaultEndpoint: "https://paddleocr.aistudio-app.com",
   },
   "PaddleOCR-VL-1.6": {
     name: "PaddleOCR-VL-1.6",
@@ -211,24 +338,36 @@ export const ENGINE_MODELS = {
     asyncModelName: "PaddleOCR-VL-1.6",
     responseType: "layoutParsingResults",
     asyncOnly: true,
+    defaultEndpoint: "https://paddleocr.aistudio-app.com",
   },
   "MinerU-pipeline": {
     name: "MinerU-pipeline",
     description: "MinerU 文档解析 (pipeline)",
     platform: "mineru" as const,
     modelVersion: "pipeline",
+    defaultEndpoint: "https://mineru.net",
   },
   "MinerU-vlm": {
     name: "MinerU-vlm",
     description: "MinerU 文档解析 (vlm推荐)",
     platform: "mineru" as const,
     modelVersion: "vlm",
+    defaultEndpoint: "https://mineru.net",
   },
   "MinerU-HTML": {
     name: "MinerU-HTML",
     description: "MinerU HTML 解析",
     platform: "mineru" as const,
     modelVersion: "MinerU-HTML",
+    defaultEndpoint: "https://mineru.net",
+  },
+  "ModelBest-OCR": {
+    name: "面壁智能 OCR",
+    description: "MiniCPM-OCR 文档解析（免费）",
+    platform: "modelbest" as const,
+    asyncModelName: "MiniCPM-OCR-1.0",
+    asyncOnly: true,
+    defaultEndpoint: "https://api.modelbest.ai",
   },
   "AI-OpenAI": {
     name: "OpenAI",
@@ -290,12 +429,6 @@ export const ENGINE_MODELS = {
     platform: "ai" as const,
     provider: "groq",
   },
-  "AI-Infinigence": {
-    name: "无问芯穹",
-    description: "Infinigence 视觉模型",
-    platform: "ai" as const,
-    provider: "infinigence",
-  },
   "AI-Mistral": {
     name: "Mistral AI",
     description: "Pixtral 视觉模型",
@@ -329,6 +462,12 @@ export const ENGINE_MODELS = {
 } as const;
 
 export type EngineType = keyof typeof ENGINE_MODELS;
+
+/** 支持端点管理的引擎的官方 API 地址；用于「API 端点管理」的自动预填 */
+export function getDefaultEndpointForEngine(engine: string): string | null {
+  const modelConfig = ENGINE_MODELS[engine as EngineType] as any;
+  return (modelConfig && modelConfig.defaultEndpoint) || null;
+}
 
 export const ENGINE_ADVANCED_FEATURES: {
   [engine: string]: {
@@ -448,6 +587,18 @@ export const ENGINE_ADVANCED_FEATURES: {
     },
   ],
   "MinerU-HTML": [],
+  "ModelBest-OCR": [
+    {
+      key: "upright",
+      labelKey: "advanced-modelbest-upright",
+      defaultValue: true,
+    },
+    {
+      key: "recognize_seal",
+      labelKey: "advanced-modelbest-recognizeSeal",
+      defaultValue: true,
+    },
+  ],
 };
 
 export interface OCRBlock {
@@ -517,85 +668,6 @@ export async function extractPagesToTempPdf(
   return tempPath;
 }
 
-function buildSyncPayload(
-  engine: EngineType,
-  fileBase64: string,
-  isPdf: boolean,
-  advancedFeatures: { [key: string]: boolean },
-) {
-  const payload: Record<string, any> = {
-    file: fileBase64,
-    fileType: isPdf ? 0 : 1,
-  };
-  for (const [key, value] of Object.entries(advancedFeatures)) {
-    payload[key] = value;
-  }
-  return payload;
-}
-
-function parseSyncResponse(
-  engine: EngineType,
-  responseData: any,
-): OCRPageResult[] {
-  const modelConfig = ENGINE_MODELS[engine];
-  const results: OCRPageResult[] = [];
-
-  if (modelConfig.responseType === "ocrResults") {
-    const ocrResults = responseData.ocrResults || [];
-    for (let i = 0; i < ocrResults.length; i++) {
-      const res = ocrResults[i];
-      const prunedResult = res.prunedResult || {};
-      let plainText = "";
-      const blocks: OCRBlock[] = [];
-
-      if (Array.isArray(prunedResult.textDetResults)) {
-        for (const det of prunedResult.textDetResults) {
-          if (det.text) {
-            plainText += det.text + "\n";
-            if (det.textRegion && det.textRegion.length >= 4) {
-              const pts = det.textRegion;
-              const xs = pts.map((p: number[]) => p[0]);
-              const ys = pts.map((p: number[]) => p[1]);
-              blocks.push({
-                text: det.text,
-                x: Math.min(...xs),
-                y: Math.min(...ys),
-                width: Math.max(...xs) - Math.min(...xs),
-                height: Math.max(...ys) - Math.min(...ys),
-                confidence: det.score || 0,
-              });
-            }
-          }
-        }
-      } else if (typeof prunedResult === "object") {
-        plainText = extractTextFromPrunedResult(prunedResult);
-      }
-
-      results.push({
-        pageNumber: i + 1,
-        markdown: plainText,
-        plainText,
-        blocks,
-      });
-    }
-  } else {
-    const layoutResults = responseData.layoutParsingResults || [];
-    for (let i = 0; i < layoutResults.length; i++) {
-      const res = layoutResults[i];
-      const md = res.markdown || {};
-      const markdownText = md.text || "";
-      results.push({
-        pageNumber: i + 1,
-        markdown: markdownText,
-        plainText: markdownText,
-        blocks: [],
-      });
-    }
-  }
-
-  return results;
-}
-
 function extractTextFromPrunedResult(prunedResult: any): string {
   if (typeof prunedResult === "string") return prunedResult;
   if (Array.isArray(prunedResult)) {
@@ -612,45 +684,6 @@ function extractTextFromPrunedResult(prunedResult: any): string {
     return prunedResult.rec_texts.join("\n");
   }
   return JSON.stringify(prunedResult, null, 2);
-}
-
-export async function callSyncAPI(
-  engine: EngineType,
-  filePath: string,
-  isPdf: boolean,
-  onProgress?: (current: number, total: number) => void,
-): Promise<OCRPageResult[]> {
-  const endpoint = getActiveEndpoint(engine);
-  if (!endpoint) {
-    throw new Error(
-      `No API endpoint configured for ${engine}. Please configure one in the preferences.`,
-    );
-  }
-
-  const modelConfig = ENGINE_MODELS[engine];
-  const advancedFeatures = getEnabledAdvancedFeatures(engine);
-  const fileBase64 = await readFileAsBase64(filePath);
-  const payload = buildSyncPayload(engine, fileBase64, isPdf, advancedFeatures);
-
-  const url = endpoint.url + modelConfig.syncPath;
-
-  const response = await Zotero.HTTP.request("POST", url, {
-    body: JSON.stringify(payload),
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `token ${endpoint.token}`,
-    },
-    responseType: "json",
-    timeout: 300000,
-  });
-
-  const responseData = response.response;
-  if (responseData.errorCode && responseData.errorCode !== 0) {
-    throw new Error(responseData.errorMsg || "API request failed");
-  }
-
-  const result = responseData.result || responseData;
-  return parseSyncResponse(engine, result);
 }
 
 const ASYNC_JOB_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs";
@@ -702,129 +735,134 @@ export async function callAsyncAPI(
   isPdf: boolean,
   onProgress?: (current: number, total: number) => void,
 ): Promise<OCRPageResult[]> {
-  const endpoint = getActiveEndpoint(engine);
-  if (!endpoint) {
-    throw new Error(
-      `No API endpoint configured for ${engine}. Please configure one in the preferences.`,
-    );
-  }
+  try {
+    const endpoint = getActiveEndpoint(engine);
+    if (!endpoint) {
+      throw new Error(
+        `No API endpoint configured for ${engine}. Please configure one in the preferences.`,
+      );
+    }
 
-  const modelConfig = ENGINE_MODELS[engine];
-  const advancedFeatures = getEnabledAdvancedFeatures(engine);
+    const modelConfig = ENGINE_MODELS[engine] as any;
+    const advancedFeatures = getResolvedAdvancedFeatures(engine);
 
-  const fileBytes = await IOUtils.read(filePath);
-  const fileName = isPdf ? "document.pdf" : "image.png";
-  const fileContentType = isPdf ? "application/pdf" : "image/png";
+    const fileBytes = await IOUtils.read(filePath);
+    const fileName = isPdf ? "document.pdf" : "image.png";
+    const fileContentType = isPdf ? "application/pdf" : "image/png";
 
-  const { body: submitBody, contentType } = buildMultipartBody(
-    fileBytes,
-    fileName,
-    fileContentType,
-    {
-      model: modelConfig.asyncModelName,
-      optionalPayload: JSON.stringify(advancedFeatures),
-    },
-  );
-
-  const submitResponse = await Zotero.HTTP.request("POST", ASYNC_JOB_URL, {
-    body: submitBody as any,
-    headers: {
-      Authorization: `bearer ${endpoint.token}`,
-      "Content-Type": contentType,
-    },
-    responseType: "text",
-    timeout: 60000,
-  });
-
-  const submitData = JSON.parse(submitResponse.responseText || "{}");
-  if (submitData.code && submitData.code !== 0) {
-    throw new Error(submitData.msg || "Failed to submit OCR job");
-  }
-
-  const jobId = submitData.data.jobId;
-
-  while (true) {
-    await Zotero.Promise.delay(3000);
-
-    const pollResponse = await Zotero.HTTP.request(
-      "GET",
-      `${ASYNC_JOB_URL}/${jobId}`,
+    const { body: submitBody, contentType } = buildMultipartBody(
+      fileBytes,
+      fileName,
+      fileContentType,
       {
-        headers: {
-          Authorization: `bearer ${endpoint.token}`,
-          "Content-Type": "application/json",
-        },
-        responseType: "text",
-        timeout: 30000,
+        model: modelConfig.asyncModelName,
+        optionalPayload: JSON.stringify(advancedFeatures),
       },
     );
 
-    const pollData = JSON.parse(pollResponse.responseText || "{}");
-    const state = pollData.data.state;
+    const submitResponse = await httpRequestWithRetry("POST", ASYNC_JOB_URL, {
+      body: submitBody as any,
+      headers: {
+        Authorization: `bearer ${endpoint.token}`,
+        "Content-Type": contentType,
+      },
+      responseType: "text",
+      timeout: 60000,
+    });
 
-    if (state === "pending") {
-      continue;
-    } else if (state === "running") {
-      const progress = pollData.data.extractProgress;
-      if (progress) {
-        const totalPages = progress.totalPages || 0;
-        const extracted = progress.extractedPages || 0;
-        if (onProgress) onProgress(extracted, totalPages);
-      }
-      continue;
-    } else if (state === "done") {
-      const jsonUrl = pollData.data.resultUrl?.jsonUrl;
-      if (!jsonUrl) {
-        throw new Error("No result URL in completed job");
-      }
+    const submitData = JSON.parse(submitResponse.responseText || "{}");
+    if (submitData.code && submitData.code !== 0) {
+      throw new Error(submitData.msg || "Failed to submit OCR job");
+    }
 
-      const jsonlResponse = await Zotero.HTTP.request("GET", jsonUrl, {
-        responseType: "text",
-        timeout: 120000,
-      });
-      const responseText = jsonlResponse.responseText || "";
-      const lines = responseText.trim().split("\n");
-      const results: OCRPageResult[] = [];
+    const jobId = submitData.data.jobId;
 
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i].trim();
-        if (!line) continue;
-        const lineData = JSON.parse(line);
-        const result = lineData.result || lineData;
+    while (true) {
+      throwIfCancelled();
+      await Zotero.Promise.delay(3000);
 
-        if (modelConfig.responseType === "ocrResults") {
-          const ocrResults = result.ocrResults || [];
-          for (let j = 0; j < ocrResults.length; j++) {
-            const res = ocrResults[j];
-            const prunedResult = res.prunedResult || {};
-            const plainText = extractTextFromPrunedResult(prunedResult);
-            results.push({
-              pageNumber: results.length + 1,
-              markdown: plainText,
-              plainText,
-              blocks: [],
-            });
-          }
-        } else {
-          const layoutResults = result.layoutParsingResults || [];
-          for (let j = 0; j < layoutResults.length; j++) {
-            const res = layoutResults[j];
-            const md = res.markdown || {};
-            const markdownText = md.text || "";
-            results.push({
-              pageNumber: results.length + 1,
-              markdown: markdownText,
-              plainText: markdownText,
-              blocks: [],
-            });
+      const pollResponse = await httpRequestWithRetry(
+        "GET",
+        `${ASYNC_JOB_URL}/${jobId}`,
+        {
+          headers: {
+            Authorization: `bearer ${endpoint.token}`,
+            "Content-Type": "application/json",
+          },
+          responseType: "text",
+          timeout: 30000,
+        },
+      );
+
+      const pollData = JSON.parse(pollResponse.responseText || "{}");
+      const state = pollData.data.state;
+
+      if (state === "pending") {
+        continue;
+      } else if (state === "running") {
+        const progress = pollData.data.extractProgress;
+        if (progress) {
+          const totalPages = progress.totalPages || 0;
+          const extracted = progress.extractedPages || 0;
+          if (onProgress) onProgress(extracted, totalPages);
+        }
+        continue;
+      } else if (state === "done") {
+        const jsonUrl = pollData.data.resultUrl?.jsonUrl;
+        if (!jsonUrl) {
+          throw new Error("No result URL in completed job");
+        }
+
+        const jsonlResponse = await httpRequestWithRetry("GET", jsonUrl, {
+          responseType: "text",
+          timeout: 120000,
+        });
+        const responseText = jsonlResponse.responseText || "";
+        const lines = responseText.trim().split("\n");
+        const results: OCRPageResult[] = [];
+
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (!line) continue;
+          const lineData = JSON.parse(line);
+          const result = lineData.result || lineData;
+
+          if (modelConfig.responseType === "ocrResults") {
+            const ocrResults = result.ocrResults || [];
+            for (let j = 0; j < ocrResults.length; j++) {
+              const res = ocrResults[j];
+              const prunedResult = res.prunedResult || {};
+              const plainText = extractTextFromPrunedResult(prunedResult);
+              results.push({
+                pageNumber: results.length + 1,
+                markdown: plainText,
+                plainText,
+                blocks: [],
+              });
+            }
+          } else {
+            const layoutResults = result.layoutParsingResults || [];
+            for (let j = 0; j < layoutResults.length; j++) {
+              const res = layoutResults[j];
+              const md = res.markdown || {};
+              const markdownText = md.text || "";
+              results.push({
+                pageNumber: results.length + 1,
+                markdown: markdownText,
+                plainText: markdownText,
+                blocks: [],
+              });
+            }
           }
         }
-      }
 
-      return results;
-    } else if (state === "failed") {
-      throw new Error(pollData.data.errorMsg || "OCR job failed");
+        return results;
+      } else if (state === "failed") {
+        throw new Error(pollData.data.errorMsg || "OCR job failed");
+      }
     }
+  } catch (e: any) {
+    throw describeHttpError(e, "PaddleOCR");
   }
 }
 
@@ -836,13 +874,14 @@ async function extractMarkdownFromZip(zipBuffer: Uint8Array): Promise<string> {
   await IOUtils.write(tempZipPath, zipBuffer);
 
   try {
-    const zipReader = Components.classes[
-      "@mozilla.org/libjar/zip-reader;1"
-    ].createInstance(Components.interfaces.nsIZipReader);
+    // Components.classes 的_contractID 索引签名未在类型中声明，按 any 访问
+    const Cc = Components.classes as any;
+    const Ci = Components.interfaces as any;
+    const zipReader = Cc["@mozilla.org/libjar/zip-reader;1"].createInstance(
+      Ci.nsIZipReader,
+    );
 
-    const zipFile = Components.classes[
-      "@mozilla.org/file/local;1"
-    ].createInstance(Components.interfaces.nsIFile);
+    const zipFile = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
     zipFile.initWithPath(tempZipPath);
 
     zipReader.open(zipFile);
@@ -863,9 +902,7 @@ async function extractMarkdownFromZip(zipBuffer: Uint8Array): Promise<string> {
     }
 
     const mdFilePath = PathUtils.join(tempDir, `full-${Date.now()}.md`);
-    const mdFile = Components.classes[
-      "@mozilla.org/file/local;1"
-    ].createInstance(Components.interfaces.nsIFile);
+    const mdFile = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
     mdFile.initWithPath(mdFilePath);
 
     zipReader.extract(mdEntryName, mdFile);
@@ -896,85 +933,45 @@ async function callMinerUAPI(
   isPdf: boolean,
   onProgress?: (current: number, total: number) => void,
 ): Promise<OCRPageResult[]> {
-  const endpoint = getActiveEndpoint(engine);
-  if (!endpoint) {
-    throw new Error(
-      `No API endpoint configured for ${engine}. Please configure one in the preferences.`,
-    );
-  }
-
-  const modelConfig = ENGINE_MODELS[engine];
-  const advancedFeatures = getEnabledAdvancedFeatures(engine);
-  let baseUrl: string;
   try {
-    const urlObj = new URL(endpoint.url);
-    baseUrl = urlObj.origin;
-  } catch {
-    baseUrl = endpoint.url.replace(/\/+$/, "");
-  }
-
-  const fileBytes = await IOUtils.read(filePath);
-  const pathParts = filePath.replace(/\\/g, "/").split("/");
-  const fileName = pathParts[pathParts.length - 1] || "document.pdf";
-
-  const requestBody: Record<string, any> = {
-    files: [{ name: fileName }],
-    model_version: modelConfig.modelVersion,
-  };
-
-  if (modelConfig.modelVersion !== "MinerU-HTML") {
-    for (const [key, value] of Object.entries(advancedFeatures)) {
-      requestBody[key] = value;
+    const endpoint = getActiveEndpoint(engine);
+    if (!endpoint) {
+      throw new Error(
+        `No API endpoint configured for ${engine}. Please configure one in the preferences.`,
+      );
     }
-    requestBody.language = "ch";
-  }
 
-  const submitResponse = await Zotero.HTTP.request(
-    "POST",
-    `${baseUrl}/api/v4/file-urls/batch`,
-    {
-      body: JSON.stringify(requestBody),
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${endpoint.token}`,
-      },
-      responseType: "json",
-      timeout: 30000,
-    },
-  );
+    const modelConfig = ENGINE_MODELS[engine] as any;
+    const advancedFeatures = getResolvedAdvancedFeatures(engine);
+    let baseUrl: string;
+    try {
+      const urlObj = new URL(endpoint.url);
+      baseUrl = urlObj.origin;
+    } catch {
+      baseUrl = endpoint.url.replace(/\/+$/, "");
+    }
 
-  const submitData = submitResponse.response;
-  if (submitData.code !== 0) {
-    throw new Error(submitData.msg || "Failed to submit MinerU task");
-  }
+    const fileBytes = await IOUtils.read(filePath);
+    const pathParts = filePath.replace(/\\/g, "/").split("/");
+    const fileName = pathParts[pathParts.length - 1] || "document.pdf";
 
-  const batchId = submitData.data.batch_id;
-  const fileUrls: string[] = submitData.data.file_urls;
+    const requestBody: Record<string, any> = {
+      files: [{ name: fileName }],
+      model_version: modelConfig.modelVersion,
+    };
 
-  if (fileUrls.length === 0) {
-    throw new Error("No upload URL returned from MinerU");
-  }
+    if (modelConfig.modelVersion !== "MinerU-HTML") {
+      for (const [key, value] of Object.entries(advancedFeatures)) {
+        requestBody[key] = value;
+      }
+      requestBody.language = "ch";
+    }
 
-  const uploadResponse = await fetch(fileUrls[0], {
-    method: "PUT",
-    body: fileBytes,
-  });
-  if (!uploadResponse.ok) {
-    const errorText = await uploadResponse.text();
-    throw new Error(
-      `File upload failed: HTTP ${uploadResponse.status} - ${errorText}`,
-    );
-  }
-
-  if (onProgress) onProgress(0, 1);
-
-  while (true) {
-    await Zotero.Promise.delay(3000);
-
-    const pollResponse = await Zotero.HTTP.request(
-      "GET",
-      `${baseUrl}/api/v4/extract-results/batch/${batchId}`,
+    const submitResponse = await httpRequestWithRetry(
+      "POST",
+      `${baseUrl}/api/v4/file-urls/batch`,
       {
+        body: JSON.stringify(requestBody),
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${endpoint.token}`,
@@ -984,42 +981,179 @@ async function callMinerUAPI(
       },
     );
 
-    const pollData = pollResponse.response;
-    const extractResults = pollData.data?.extract_result || [];
+    const submitData = submitResponse.response;
+    if (submitData.code !== 0) {
+      throw new Error(submitData.msg || "Failed to submit MinerU task");
+    }
 
-    if (extractResults.length === 0) continue;
+    const batchId = submitData.data.batch_id;
+    const fileUrls: string[] = submitData.data.file_urls;
 
-    const fileResult = extractResults[0];
-    const state = fileResult.state;
+    if (fileUrls.length === 0) {
+      throw new Error("No upload URL returned from MinerU");
+    }
 
-    if (
-      state === "pending" ||
-      state === "waiting-file" ||
-      state === "converting"
-    ) {
-      continue;
-    } else if (state === "running") {
-      const progress = fileResult.extract_progress;
-      if (progress) {
-        const totalPages = progress.total_pages || 0;
-        const extracted = progress.extracted_pages || 0;
-        if (onProgress) onProgress(extracted, totalPages);
+    const uploadResponse = await fetch(fileUrls[0], {
+      method: "PUT",
+      body: fileBytes,
+    });
+    if (!uploadResponse.ok) {
+      const errorText = await uploadResponse.text();
+      throw new Error(
+        `File upload failed: HTTP ${uploadResponse.status} - ${errorText}`,
+      );
+    }
+
+    if (onProgress) onProgress(0, 1);
+
+    while (true) {
+      throwIfCancelled();
+      await Zotero.Promise.delay(3000);
+
+      const pollResponse = await httpRequestWithRetry(
+        "GET",
+        `${baseUrl}/api/v4/extract-results/batch/${batchId}`,
+        {
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${endpoint.token}`,
+          },
+          responseType: "json",
+          timeout: 30000,
+        },
+      );
+
+      const pollData = pollResponse.response;
+      const extractResults = pollData.data?.extract_result || [];
+
+      if (extractResults.length === 0) continue;
+
+      const fileResult = extractResults[0];
+      const state = fileResult.state;
+
+      if (
+        state === "pending" ||
+        state === "waiting-file" ||
+        state === "converting"
+      ) {
+        continue;
+      } else if (state === "running") {
+        const progress = fileResult.extract_progress;
+        if (progress) {
+          const totalPages = progress.total_pages || 0;
+          const extracted = progress.extracted_pages || 0;
+          if (onProgress) onProgress(extracted, totalPages);
+        }
+        continue;
+      } else if (state === "done") {
+        const zipUrl = fileResult.full_zip_url;
+        if (!zipUrl) {
+          throw new Error("No result zip URL in completed MinerU task");
+        }
+
+        const zipResponse = await Zotero.HTTP.request("GET", zipUrl, {
+          responseType: "arraybuffer",
+          timeout: 120000,
+        });
+
+        const zipBuffer = new Uint8Array(zipResponse.response);
+        const markdown = await extractMarkdownFromZip(zipBuffer);
+
+        return [
+          {
+            pageNumber: 1,
+            markdown,
+            plainText: markdown,
+            blocks: [],
+          },
+        ];
+      } else if (state === "failed") {
+        throw new Error(fileResult.err_msg || "MinerU extraction task failed");
       }
-      continue;
-    } else if (state === "done") {
-      const zipUrl = fileResult.full_zip_url;
-      if (!zipUrl) {
-        throw new Error("No result zip URL in completed MinerU task");
+    }
+  } catch (e: any) {
+    throw describeHttpError(e, "MinerU");
+  }
+}
+
+function getModelBestBaseUrl(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return url.replace(/\/+$/, "");
+  }
+}
+
+/**
+ * 面壁智能（ModelBest）文档解析引擎。
+ * 单图走同步接口 POST /v1/document-parse（JSON 直传 base64 图片）；
+ * PDF 走异步任务 POST /v1/document-parse/jobs（multipart 直传文件，服务端逐页渲染），
+ * 轮询 GET /v1/document-parse/jobs/{id} 直到 Success/Failed/Cancelled。
+ * 高级功能：upright（方向矫正）、recognize_seal（印章识别）——API 默认均为 true，
+ * 需显式传布尔值（经 getResolvedAdvancedFeatures 全量解析）。
+ */
+export async function callModelBestAPI(
+  engine: EngineType,
+  filePath: string,
+  isPdf: boolean,
+  onProgress?: (current: number, total: number) => void,
+): Promise<OCRPageResult[]> {
+  try {
+    const endpoint = getActiveEndpoint(engine);
+    if (!endpoint) {
+      throw new Error(
+        `No API endpoint configured for ${engine}. Please configure one in the preferences.`,
+      );
+    }
+
+    const baseUrl = getModelBestBaseUrl(endpoint.url);
+    const modelConfig = ENGINE_MODELS[engine] as any;
+    const modelName = modelConfig.asyncModelName;
+    const advancedFeatures = getResolvedAdvancedFeatures(engine);
+
+    const authHeaders: Record<string, string> = {
+      Authorization: `Bearer ${endpoint.token}`,
+    };
+
+    if (!isPdf) {
+      // 同步接口：单图识别（仅支持图片，PDF 走异步任务）
+      const fileBase64 = await readFileAsBase64(filePath);
+      const fileName = filePath.replace(/\\/g, "/").split("/").pop() || "";
+      let mimeType = "image/png";
+      const ext = fileName.toLowerCase();
+      if (ext.endsWith(".jpg") || ext.endsWith(".jpeg")) {
+        mimeType = "image/jpeg";
+      } else if (ext.endsWith(".gif")) {
+        mimeType = "image/gif";
+      } else if (ext.endsWith(".webp")) {
+        mimeType = "image/webp";
+      } else if (ext.endsWith(".bmp")) {
+        mimeType = "image/bmp";
       }
 
-      const zipResponse = await Zotero.HTTP.request("GET", zipUrl, {
-        responseType: "arraybuffer",
-        timeout: 120000,
-      });
+      const payload = {
+        model: modelName,
+        image: `data:${mimeType};base64,${fileBase64}`,
+        ...advancedFeatures,
+      };
 
-      const zipBuffer = new Uint8Array(zipResponse.response);
-      const markdown = await extractMarkdownFromZip(zipBuffer);
+      const response = await httpRequestWithRetry(
+        "POST",
+        `${baseUrl}/v1/document-parse`,
+        {
+          body: JSON.stringify(payload),
+          headers: { "Content-Type": "application/json", ...authHeaders },
+          responseType: "text",
+          timeout: 300000,
+        },
+      );
 
+      const data = JSON.parse(response.responseText || "{}");
+      if (data.error) {
+        throw new Error(data.error.message || "ModelBest OCR API error");
+      }
+      const markdown =
+        data.choices?.[0]?.message?.content || data.markdown || "";
       return [
         {
           pageNumber: 1,
@@ -1028,9 +1162,129 @@ async function callMinerUAPI(
           blocks: [],
         },
       ];
-    } else if (state === "failed") {
-      throw new Error(fileResult.err_msg || "MinerU extraction task failed");
     }
+
+    // 异步任务：multipart 直传 PDF，服务端按页解析（最多 500 页，144 DPI）
+    const fileBytes = await IOUtils.read(filePath);
+    const { body: submitBody, contentType } = buildMultipartBody(
+      fileBytes,
+      "document.pdf",
+      "application/pdf",
+      {
+        model: modelName,
+        upright: String(advancedFeatures.upright),
+        recognize_seal: String(advancedFeatures.recognize_seal),
+      },
+    );
+
+    const submitResponse = await httpRequestWithRetry(
+      "POST",
+      `${baseUrl}/v1/document-parse/jobs`,
+      {
+        body: submitBody as any,
+        headers: { "Content-Type": contentType, ...authHeaders },
+        responseType: "text",
+        timeout: 120000,
+      },
+    );
+
+    const submitData = JSON.parse(submitResponse.responseText || "{}");
+    if (submitData.error) {
+      throw new Error(
+        submitData.error.message || "Failed to submit ModelBest OCR job",
+      );
+    }
+    const jobId = submitData.id;
+    if (!jobId) {
+      throw new Error("No job id returned from ModelBest");
+    }
+
+    if (onProgress) onProgress(0, 1);
+
+    // 官方建议轮询 1-2 秒一次，客户端 15 分钟截止
+    const deadline = Date.now() + 15 * 60 * 1000;
+    while (true) {
+      throwIfCancelled();
+      await Zotero.Promise.delay(2000);
+      if (Date.now() > deadline) {
+        throw new Error(
+          "ModelBest OCR job timed out after 15 minutes; please retry later",
+        );
+      }
+
+      const pollResponse = await httpRequestWithRetry(
+        "GET",
+        `${baseUrl}/v1/document-parse/jobs/${jobId}`,
+        {
+          headers: { "Content-Type": "application/json", ...authHeaders },
+          responseType: "text",
+          timeout: 30000,
+        },
+      );
+
+      const pollData = JSON.parse(pollResponse.responseText || "{}");
+      if (pollData.error) {
+        throw new Error(
+          pollData.error.message || "ModelBest OCR job polling failed",
+        );
+      }
+
+      const status = pollData.status;
+      if (status === "Running" || status === "Queued" || status === "Pending") {
+        const done = pollData.pages_done || 0;
+        const total = pollData.pages_total || 0;
+        if (onProgress && total > 0) {
+          onProgress(done, total);
+        } else if (onProgress) {
+          onProgress(0, 1);
+        }
+        continue;
+      }
+
+      if (status === "Success") {
+        const jobPages = pollData.pages || [];
+        const results: OCRPageResult[] = [];
+        for (const page of jobPages) {
+          const pageIndex = (page.metadata && page.metadata.page_index) || 0;
+          const md =
+            (page.choices &&
+              page.choices[0] &&
+              page.choices[0].message &&
+              page.choices[0].message.content) ||
+            "";
+          results.push({
+            pageNumber: pageIndex + 1,
+            markdown: md,
+            plainText: md,
+            blocks: [],
+          });
+        }
+        if (results.length === 0 && pollData.markdown) {
+          // 兜底：任务级合并 markdown
+          results.push({
+            pageNumber: 1,
+            markdown: pollData.markdown,
+            plainText: pollData.markdown,
+            blocks: [],
+          });
+        }
+        return results;
+      }
+
+      if (status === "Failed") {
+        const jobError =
+          typeof pollData.error === "string"
+            ? pollData.error
+            : pollData.error?.message;
+        throw new Error(jobError || "ModelBest OCR job failed");
+      }
+
+      if (status === "Cancelled") {
+        throw new Error("ModelBest OCR job was cancelled");
+      }
+    }
+  } catch (e: any) {
+    throw describeHttpError(e, "面壁智能");
   }
 }
 
@@ -1670,10 +1924,10 @@ async function renderPdfChrome(
     const canvas = win.document.createElementNS(
       "http://www.w3.org/1999/xhtml",
       "canvas",
-    );
+    ) as HTMLCanvasElement;
     canvas.width = viewport.width;
     canvas.height = viewport.height;
-    const ctx = canvas.getContext("2d");
+    const ctx = canvas.getContext("2d") as CanvasRenderingContext2D;
 
     ctx.fillStyle = "#ffffff";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -2035,6 +2289,9 @@ async function renderPdfIframeSandbox(
   ztoolkit.log(
     `[AIOCR] renderPdfIframeSandbox: render complete, result length=${resultJson?.length ?? "null"}`,
   );
+  if (!resultJson) {
+    throw new Error("renderPdfIframeSandbox: render returned no result");
+  }
 
   const parsed = JSON.parse(resultJson);
   if (parsed.images && parsed.pageNumbers) {
@@ -2076,12 +2333,17 @@ async function callAIOneImage(
       ],
       generationConfig: { temperature: 0.1, maxOutputTokens: 8192 },
     };
-    const response = await Zotero.HTTP.request("POST", url, {
-      body: JSON.stringify(requestBody),
-      headers: { "Content-Type": "application/json" },
-      responseType: "json",
-      timeout: 300000,
-    });
+    let response: any;
+    try {
+      response = await httpRequestWithRetry("POST", url, {
+        body: JSON.stringify(requestBody),
+        headers: { "Content-Type": "application/json" },
+        responseType: "json",
+        timeout: 300000,
+      });
+    } catch (e: any) {
+      throw describeHttpError(e, providerConfig.name);
+    }
     const data = response.response;
     if (data.error) throw new Error(data.error.message || "Gemini API error");
     const candidates = data.candidates || [];
@@ -2139,12 +2401,17 @@ async function callAIOneImage(
           headers["Authorization"] = `Bearer ${apiKey}`;
         }
       }
-      const response = await Zotero.HTTP.request("POST", url, {
-        body: JSON.stringify(requestBody),
-        headers,
-        responseType: "json",
-        timeout: 300000,
-      });
+      let response: any;
+      try {
+        response = await httpRequestWithRetry("POST", url, {
+          body: JSON.stringify(requestBody),
+          headers,
+          responseType: "json",
+          timeout: 300000,
+        });
+      } catch (e: any) {
+        throw describeHttpError(e, providerConfig.name);
+      }
       const data = response.response;
       if (data.error) {
         const errMsg = data.error.message || "API error";
@@ -2220,6 +2487,167 @@ export function getAIProviderConfig(engine: string): {
   };
 }
 
+/** 明显与视觉/文本生成无关的模型族，从自动获取的模型列表中排除 */
+const NON_VISION_MODEL_RE =
+  /embed|tts|whisper|dall-e|moderation|rerank|audio|speech|transcrib|image-gen|stable-diffusion|flux|veo|sora|imagen|aqa|guard|classif/i;
+
+function normalizeModelNames(names: string[]): string[] {
+  return Array.from(new Set(names))
+    .filter((n) => !NON_VISION_MODEL_RE.test(n))
+    .sort((a, b) => a.localeCompare(b));
+}
+
+/** Gemini listModels：过滤出支持 generateContent 的模型并剥掉 models/ 前缀 */
+async function fetchGeminiModelList(
+  listUrl: string,
+  apiKey: string,
+): Promise<string[]> {
+  const resp = await httpRequestWithRetry(
+    "GET",
+    `${listUrl}?key=${encodeURIComponent(apiKey)}`,
+    { responseType: "json", timeout: 15000 },
+  );
+  const models = resp.response?.models || [];
+  return models
+    .filter(
+      (m: any) =>
+        Array.isArray(m.supportedGenerationMethods) &&
+        m.supportedGenerationMethods.includes("generateContent"),
+    )
+    .map((m: any) => String(m.name || "").replace(/^models\//, ""))
+    .filter(Boolean);
+}
+
+/** Ollama 本地 /api/tags：列出已安装模型 */
+async function fetchOllamaModelList(baseUrl: string): Promise<string[]> {
+  let origin = baseUrl;
+  try {
+    origin = new URL(baseUrl).origin;
+  } catch {
+    /* keep base */
+  }
+  const resp = await httpRequestWithRetry("GET", `${origin}/api/tags`, {
+    responseType: "json",
+    timeout: 10000,
+  });
+  const models = resp.response?.models || [];
+  return models.map((m: any) => m.name).filter(Boolean);
+}
+
+/** OpenAI 兼容 GET {base}/models（按认证格式带 Bearer 或 api-key 头） */
+async function fetchOpenAICompatibleModelList(
+  baseUrl: string,
+  apiKey: string,
+  authHeaderFormat?: "bearer" | "api-key",
+): Promise<string[]> {
+  const headers: Record<string, string> = {};
+  if (apiKey) {
+    if (authHeaderFormat === "api-key") {
+      headers["api-key"] = apiKey;
+    } else {
+      headers["Authorization"] = `Bearer ${apiKey}`;
+    }
+  }
+  const resp = await httpRequestWithRetry("GET", `${baseUrl}/models`, {
+    headers,
+    responseType: "json",
+    timeout: 15000,
+  });
+  const data = resp.response;
+  const list = Array.isArray(data?.data)
+    ? data.data
+    : Array.isArray(data?.models)
+      ? data.models
+      : [];
+  return list
+    .map((m: any) => (typeof m === "string" ? m : m.id || m.name))
+    .filter(Boolean)
+    .map(String);
+}
+
+/**
+ * 自动获取平台可用模型列表，供偏好设置中的模型名称下拉框使用。
+ * OpenAI 兼容平台走 GET {base}/models（按平台认证头），
+ * Gemini 走 listModels 并过滤出支持 generateContent 的模型，
+ * Ollama 走本地 /api/tags。失败时返回空数组，由调用方回退为默认模型。
+ */
+export async function fetchAIModelList(
+  engine: string,
+  overrides?: { apiKey?: string; apiBase?: string },
+): Promise<string[]> {
+  const modelConfig = ENGINE_MODELS[engine as EngineType] as any;
+  if (!modelConfig || modelConfig.platform !== "ai") return [];
+  const provider = modelConfig.provider;
+  const providerConfig = AI_PROVIDER_CONFIGS[provider];
+  if (!providerConfig) return [];
+
+  const cfg = getAIProviderConfig(engine);
+  const apiKey =
+    overrides && overrides.apiKey !== undefined ? overrides.apiKey : cfg.apiKey;
+  const apiBase =
+    overrides && overrides.apiBase ? overrides.apiBase : cfg.apiBase;
+  const base = apiBase.replace(/\/+$/, "");
+
+  try {
+    let names: string[] = [];
+    if (providerConfig.apiFormat === "gemini") {
+      names = await fetchGeminiModelList(`${base}/models`, apiKey);
+    } else if (provider === "ollama") {
+      names = await fetchOllamaModelList(base);
+    } else {
+      names = await fetchOpenAICompatibleModelList(
+        base,
+        apiKey,
+        providerConfig.authHeaderFormat,
+      );
+    }
+    return normalizeModelNames(names);
+  } catch (e: any) {
+    ztoolkit.log(
+      `[AIOCR] fetchAIModelList: failed for ${provider}: ${e.message}`,
+    );
+    return [];
+  }
+}
+
+/**
+ * 从自定义引擎的 API 地址拉取模型列表（自定义引擎无平台预设，按 URL 形态识别）：
+ * - 含 generativelanguage → Gemini，从完整 generateContent 端点归位到 models 列表端点
+ * - base 以 /api 结尾或含 :11434 → Ollama 本地 /api/tags
+ * - 其余按 OpenAI 兼容 GET {base}/models（Bearer），base 支持带 /chat/completions 后缀
+ * 失败时返回空数组，下拉框留空、仍可手动输入。
+ */
+export async function fetchModelListForEndpoint(
+  apiUrl: string,
+  apiKey: string,
+): Promise<string[]> {
+  const raw = apiUrl.trim().replace(/\/+$/, "");
+  if (!raw) return [];
+  try {
+    if (isGeminiUrl(raw)) {
+      let listUrl = raw.split(":generateContent")[0].replace(/\/+$/, "");
+      if (/\/models\/[^/]+$/.test(listUrl)) {
+        listUrl = listUrl.replace(/\/models\/[^/]+$/, "/models");
+      } else if (!/\/models$/.test(listUrl)) {
+        listUrl = `${listUrl}/models`;
+      }
+      return normalizeModelNames(await fetchGeminiModelList(listUrl, apiKey));
+    }
+    const base = raw.replace(/\/chat\/completions\/?$/, "");
+    if (/\/api$/.test(base) || base.includes(":11434")) {
+      return normalizeModelNames(await fetchOllamaModelList(base));
+    }
+    return normalizeModelNames(
+      await fetchOpenAICompatibleModelList(base, apiKey),
+    );
+  } catch (e: any) {
+    ztoolkit.log(
+      `[AIOCR] fetchModelListForEndpoint: failed for ${raw}: ${e.message}`,
+    );
+    return [];
+  }
+}
+
 async function callCustomVisionAPI(
   engineId: string,
   filePath: string,
@@ -2241,6 +2669,7 @@ async function callCustomVisionAPI(
     const images = await pdfToImages(filePath, onProgress, itemId);
     const results: OCRPageResult[] = [];
     for (let i = 0; i < images.length; i++) {
+      throwIfCancelled();
       const img = images[i];
       if (onProgress) onProgress(i + 1, images.length);
       const markdown = await callCustomOneImage(
@@ -2278,10 +2707,11 @@ async function callCustomOneImage(
   prompt: string,
 ): Promise<string> {
   let markdown = "";
-  const url = customEngine.apiUrl.replace(/\/+$/, "");
-  const isGemini = isGeminiUrl(url);
+  const raw = customEngine.apiUrl.trim().replace(/\/+$/, "");
+  const isGemini = isGeminiUrl(raw);
 
   if (isGemini) {
+    const url = raw;
     const separator = url.includes("?") ? "&" : "?";
     const fullUrl = `${url}${separator}key=${customEngine.apiKey}`;
     const requestBody = {
@@ -2298,12 +2728,17 @@ async function callCustomOneImage(
         maxOutputTokens: customEngine.maxTokens,
       },
     };
-    const response = await Zotero.HTTP.request("POST", fullUrl, {
-      body: JSON.stringify(requestBody),
-      headers: { "Content-Type": "application/json" },
-      responseType: "json",
-      timeout: 300000,
-    });
+    let response: any;
+    try {
+      response = await httpRequestWithRetry("POST", fullUrl, {
+        body: JSON.stringify(requestBody),
+        headers: { "Content-Type": "application/json" },
+        responseType: "json",
+        timeout: 300000,
+      });
+    } catch (e: any) {
+      throw describeHttpError(e, customEngine.name);
+    }
     const data = response.response;
     if (data.error) throw new Error(data.error.message || "Gemini API error");
     const candidates = data.candidates || [];
@@ -2315,6 +2750,11 @@ async function callCustomOneImage(
         .join("\n");
     }
   } else {
+    // 地址兼容两种填法：裸 base（自动补 /chat/completions，与模型列表获取
+    // 的归一化规则一致）或完整端点地址
+    const url = /\/chat\/completions(\?.*)?$/.test(raw)
+      ? raw
+      : `${raw}/chat/completions`;
     const requestBody: Record<string, any> = {
       model: customEngine.model,
       messages: [
@@ -2340,12 +2780,17 @@ async function callCustomOneImage(
     if (customEngine.apiKey) {
       headers["Authorization"] = `Bearer ${customEngine.apiKey}`;
     }
-    const response = await Zotero.HTTP.request("POST", url, {
-      body: JSON.stringify(requestBody),
-      headers,
-      responseType: "json",
-      timeout: 300000,
-    });
+    let response: any;
+    try {
+      response = await httpRequestWithRetry("POST", url, {
+        body: JSON.stringify(requestBody),
+        headers,
+        responseType: "json",
+        timeout: 300000,
+      });
+    } catch (e: any) {
+      throw describeHttpError(e, customEngine.name);
+    }
     const data = response.response;
     if (data.error) {
       const errMsg = data.error.message || "API error";
@@ -2390,6 +2835,7 @@ async function callAIVisionAPI(
     const images = await pdfToImages(filePath, onProgress, itemId);
     const results: OCRPageResult[] = [];
     for (let i = 0; i < images.length; i++) {
+      throwIfCancelled();
       const img = images[i];
       if (onProgress) onProgress(i + 1, images.length);
       const markdown = await callAIOneImage(
@@ -2477,22 +2923,34 @@ export async function performOCR(
 
   if (modelConfig.platform === "ai") {
     pages = await callAIVisionAPI(
-      selectedEngine,
+      selectedEngine as EngineType,
       filePath,
       isPdf,
       onProgress,
       itemId,
     );
+  } else if (modelConfig.platform === "modelbest") {
+    pages = await callModelBestAPI(
+      selectedEngine as EngineType,
+      filePath,
+      isPdf,
+      onProgress,
+    );
   } else if (modelConfig.platform === "mineru") {
-    pages = await callMinerUAPI(selectedEngine, filePath, isPdf, onProgress);
+    pages = await callMinerUAPI(
+      selectedEngine as EngineType,
+      filePath,
+      isPdf,
+      onProgress,
+    );
   } else {
-    const apiMode = getPref("apiMode") as string;
-    const isAsyncOnly = (modelConfig as any).asyncOnly === true;
-    if (apiMode === "async" || isAsyncOnly) {
-      pages = await callAsyncAPI(selectedEngine, filePath, isPdf, onProgress);
-    } else {
-      pages = await callSyncAPI(selectedEngine, filePath, isPdf, onProgress);
-    }
+    // PaddleOCR 引擎：v1.7.0 起仅支持异步 API
+    pages = await callAsyncAPI(
+      selectedEngine as EngineType,
+      filePath,
+      isPdf,
+      onProgress,
+    );
   }
 
   const fullMarkdown = pages.map((p) => p.markdown).join("\n\n---\n\n");
@@ -2592,6 +3050,19 @@ export async function testConnection(
           message: getString("progress-test-success"),
         };
       }
+    }
+
+    if (modelConfig.platform === "modelbest") {
+      const modelBestBase = getModelBestBaseUrl(url);
+      await Zotero.HTTP.request("GET", `${modelBestBase}/v1/models`, {
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        responseType: "json",
+        timeout: 10000,
+      });
+      return { success: true, message: getString("progress-test-success") };
     }
 
     if (modelConfig.platform === "mineru") {

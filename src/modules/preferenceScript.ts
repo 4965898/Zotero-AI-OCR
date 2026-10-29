@@ -25,6 +25,9 @@ import {
   AI_PROVIDER_CONFIGS,
   EngineType,
   getAIProviderConfig,
+  fetchAIModelList,
+  fetchModelListForEndpoint,
+  getDefaultEndpointForEngine,
 } from "./ocr-engine";
 import { refreshEngineMenu } from "./context-menu";
 
@@ -61,7 +64,7 @@ function registerPrefObserver(win: Window) {
   try {
     Zotero.Prefs.registerObserver(
       "extensions.zotero.aiocr.engine",
-      prefObserver,
+      prefObserver as any,
     );
   } catch {
     /* ignore */
@@ -69,7 +72,7 @@ function registerPrefObserver(win: Window) {
 
   win.addEventListener("unload", () => {
     try {
-      Zotero.Prefs.unregisterObserver(prefObserver);
+      Zotero.Prefs.unregisterObserver(prefObserver as any);
     } catch {
       /* ignore */
     }
@@ -86,7 +89,6 @@ function initPrefValues(win: Window) {
   const doc = win.document;
 
   setMenulistValue(doc, "aiocr-engine", getPref("engine") as string);
-  setMenulistValue(doc, "aiocr-api-mode", getPref("apiMode") as string);
   setMenulistValue(doc, "aiocr-note-naming", getPref("noteNaming") as string);
 
   const customNamingRow = doc.getElementById("aiocr-custom-naming-row");
@@ -115,36 +117,28 @@ function initPrefValues(win: Window) {
   if (concurrencyInput) {
     concurrencyInput.value = String(getPref("concurrency"));
   }
-
-  updateApiModeVisibility(win);
 }
 
-function updateApiModeVisibility(win: Window) {
-  const doc = win.document;
+/** 引擎支持端点管理且尚无任何端点时，自动创建一条官方默认端点（URL 预填，只差 Token） */
+function ensureDefaultEndpoint(win: Window) {
   const engine = getPref("engine") as string;
-  const isCustom = engine.startsWith("custom-");
-  const modelConfig = ENGINE_MODELS[engine as EngineType];
-  const isMinerU = modelConfig && (modelConfig as any).platform === "mineru";
-  const isAI = modelConfig && (modelConfig as any).platform === "ai";
-  const isAsyncOnly = modelConfig && (modelConfig as any).asyncOnly === true;
-
-  const apiModeLabel = doc.getElementById("aiocr-api-mode-label");
-  const apiModeSelect = doc.getElementById("aiocr-api-mode") as XUL.MenuList;
-  if (apiModeLabel && apiModeSelect) {
-    if (isMinerU || isAI || isCustom || isAsyncOnly) {
-      (apiModeLabel as HTMLElement).setAttribute("hidden", "true");
-      apiModeSelect.setAttribute("hidden", "true");
-    } else {
-      (apiModeLabel as HTMLElement).removeAttribute("hidden");
-      apiModeSelect.removeAttribute("hidden");
-    }
-  }
+  const defaultUrl = getDefaultEndpointForEngine(engine);
+  if (!defaultUrl) return;
+  if (getEndpointsForEngine(engine).length > 0) return;
+  addEndpoint(engine, {
+    id: "default",
+    name: getString("pref-endpoints-default-name"),
+    url: defaultUrl,
+    token: "",
+    active: true,
+  });
+  renderEndpointList(win, engine);
 }
 
 function initEndpointsTab(win: Window) {
   const doc = win.document;
-  const currentEngine = getPref("engine") as string;
-  renderEndpointList(win, currentEngine);
+  ensureDefaultEndpoint(win);
+  renderEndpointList(win, getPref("engine") as string);
 
   const addBtn = doc.getElementById("aiocr-endpoint-add");
   addBtn?.addEventListener("command", () => {
@@ -497,9 +491,9 @@ function renderAdvancedFeatures(win: Window, engine: string) {
 
 function onEngineChanged(win: Window, newEngine: string) {
   setPref("engine", newEngine);
+  ensureDefaultEndpoint(win);
   renderEndpointList(win, newEngine);
   renderAdvancedFeatures(win, newEngine);
-  updateApiModeVisibility(win);
   updateAIProviderTab(win);
   try {
     refreshEngineMenu();
@@ -515,13 +509,6 @@ function bindPrefEvents(win: Window) {
   if (engineSelect) {
     engineSelect.addEventListener("command", () => {
       onEngineChanged(win, engineSelect.value);
-    });
-  }
-
-  const apiModeSelect = doc.getElementById("aiocr-api-mode") as XUL.MenuList;
-  if (apiModeSelect) {
-    apiModeSelect.addEventListener("command", () => {
-      setPref("apiMode", apiModeSelect.value);
     });
   }
 
@@ -571,11 +558,9 @@ function bindPrefEvents(win: Window) {
 
   const githubLink = doc.getElementById("aiocr-github-link");
   if (githubLink) {
-    githubLink.addEventListener("click", (e) => {
+    githubLink.addEventListener("click", (e: MouseEvent) => {
       e.preventDefault();
-      Zotero.launchURL(
-        "https://github.com/4965898/Zotero-AI-OCR",
-      );
+      Zotero.launchURL("https://github.com/4965898/Zotero-AI-OCR");
     });
   }
 }
@@ -586,6 +571,20 @@ function initAIProviderTab(win: Window) {
   const saveBtn = doc(win).getElementById("aiocr-ai-provider-save");
   saveBtn?.addEventListener("command", () => {
     saveAIProviderConfig(win);
+  });
+
+  // API Key / API Base 变更后自动刷新模型列表
+  const apiKeyInput = doc(win).getElementById(
+    "aiocr-ai-api-key",
+  ) as HTMLInputElement;
+  apiKeyInput?.addEventListener("change", () => {
+    refreshModelList(win);
+  });
+  const apiBaseInput = doc(win).getElementById(
+    "aiocr-ai-api-base",
+  ) as HTMLInputElement;
+  apiBaseInput?.addEventListener("change", () => {
+    refreshModelList(win);
   });
 
   const testBtn = doc(win).getElementById("aiocr-ai-provider-test");
@@ -632,6 +631,89 @@ function doc(win: Window): Document {
   return win.document;
 }
 
+function buildProviderHintText(provider: string, providerConfig: any): string {
+  const supportsPdf = provider === "openai" || provider === "openrouter";
+  let hintText = supportsPdf
+    ? `提示：${providerConfig.name} 原生支持 PDF 输入，可直接发送 PDF 文件进行识别。也支持图片输入。`
+    : `提示：${providerConfig.name} 不原生支持 PDF，插件会先将 PDF 逐页渲染为图片后发送给模型识别。`;
+  if (providerConfig.modelHint) {
+    hintText += `\n⚠️ ${providerConfig.modelHint}`;
+  }
+  return hintText;
+}
+
+let modelListFetchSeq = 0;
+
+/**
+ * 拉取当前 AI 平台的模型列表并填充「模型名称」可编辑下拉框。
+ * 先用已保存/默认模型占位，再异步拉取覆盖；引擎切换后过期结果直接丢弃。
+ */
+async function refreshModelList(win: Window) {
+  const d = doc(win);
+  const engine = getPref("engine") as string;
+  const modelConfig = ENGINE_MODELS[engine as EngineType] as any;
+  const modelMenulist = d.getElementById("aiocr-ai-model") as XUL.MenuList;
+  if (!modelMenulist || !modelConfig || modelConfig.platform !== "ai") return;
+  const provider = modelConfig.provider;
+  const providerConfig = AI_PROVIDER_CONFIGS[provider];
+  if (!providerConfig) return;
+
+  const seq = ++modelListFetchSeq;
+
+  const currentValue = getAIProviderConfig(engine).model;
+
+  const apiKeyInput = d.getElementById("aiocr-ai-api-key") as HTMLInputElement;
+  const apiBaseInput = d.getElementById(
+    "aiocr-ai-api-base",
+  ) as HTMLInputElement;
+
+  const populate = (
+    models: string[],
+    hintStatus: "pending" | "ok" | "fail",
+  ) => {
+    if (seq !== modelListFetchSeq) return;
+    if ((getPref("engine") as string) !== engine) return;
+
+    const menupopup = modelMenulist.querySelector("menupopup");
+    if (menupopup) {
+      while (menupopup.firstChild) {
+        menupopup.removeChild(menupopup.firstChild);
+      }
+      const items = [currentValue, ...models.filter((m) => m !== currentValue)];
+      for (const name of items) {
+        const menuItem = d.createElementNS(
+          "http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul",
+          "menuitem",
+        );
+        menuItem.setAttribute("value", name);
+        menuItem.setAttribute("label", name);
+        menupopup.appendChild(menuItem);
+      }
+    }
+    modelMenulist.value = currentValue;
+
+    const hintEl = d.getElementById("aiocr-ai-provider-hint");
+    if (hintEl && hintStatus !== "pending") {
+      let hintText = buildProviderHintText(provider, providerConfig);
+      if (hintStatus === "ok") {
+        hintText += `\n✅ 已从平台获取 ${models.length} 个可用模型，下拉选择或手动输入均可`;
+      } else {
+        hintText += `\n⚠️ 未获取到模型列表（可能未填 API Key 或平台未开放该接口），可直接手动输入模型名`;
+      }
+      hintEl.textContent = hintText;
+    }
+  };
+
+  populate([], "pending");
+
+  const overrides = {
+    apiKey: apiKeyInput ? apiKeyInput.value : undefined,
+    apiBase: apiBaseInput ? apiBaseInput.value : undefined,
+  };
+  const models = await fetchAIModelList(engine, overrides);
+  populate(models, models.length > 0 ? "ok" : "fail");
+}
+
 function updateAIProviderTab(win: Window) {
   const d = doc(win);
   const engine = getPref("engine") as string;
@@ -640,7 +722,7 @@ function updateAIProviderTab(win: Window) {
 
   const providerNameLabel = d.getElementById("aiocr-ai-provider-name");
   const apiKeyInput = d.getElementById("aiocr-ai-api-key") as HTMLInputElement;
-  const modelInput = d.getElementById("aiocr-ai-model") as HTMLInputElement;
+  const modelMenulist = d.getElementById("aiocr-ai-model") as XUL.MenuList;
   const apiBaseInput = d.getElementById(
     "aiocr-ai-api-base",
   ) as HTMLInputElement;
@@ -653,18 +735,18 @@ function updateAIProviderTab(win: Window) {
     if (providerNameLabel)
       providerNameLabel.setAttribute("value", "(未选择 AI 引擎)");
     if (apiKeyInput) apiKeyInput.value = "";
-    if (modelInput) modelInput.value = "";
+    if (modelMenulist) modelMenulist.value = "";
     if (apiBaseInput) apiBaseInput.value = "";
     if (customPromptInput) customPromptInput.value = "";
     if (apiKeyInput) apiKeyInput.setAttribute("disabled", "true");
-    if (modelInput) modelInput.setAttribute("disabled", "true");
+    if (modelMenulist) modelMenulist.setAttribute("disabled", "true");
     if (apiBaseInput) apiBaseInput.setAttribute("disabled", "true");
     if (customPromptInput) customPromptInput.setAttribute("disabled", "true");
     return;
   }
 
   if (apiKeyInput) apiKeyInput.removeAttribute("disabled");
-  if (modelInput) modelInput.removeAttribute("disabled");
+  if (modelMenulist) modelMenulist.removeAttribute("disabled");
   if (apiBaseInput) apiBaseInput.removeAttribute("disabled");
   if (customPromptInput) customPromptInput.removeAttribute("disabled");
 
@@ -683,8 +765,8 @@ function updateAIProviderTab(win: Window) {
     const saved = configs[provider] || {};
 
     if (apiKeyInput) apiKeyInput.value = saved.apiKey || "";
-    if (modelInput)
-      modelInput.value = saved.model || providerConfig.defaultModel;
+    if (modelMenulist)
+      modelMenulist.value = saved.model || providerConfig.defaultModel;
     if (apiBaseInput) apiBaseInput.value = saved.apiBase || "";
 
     if (customPromptInput) {
@@ -696,21 +778,16 @@ function updateAIProviderTab(win: Window) {
     }
 
     if (hintEl) {
-      const supportsPdf = provider === "openai" || provider === "openrouter";
-      let hintText = supportsPdf
-        ? `提示：${providerConfig.name} 原生支持 PDF 输入，可直接发送 PDF 文件进行识别。也支持图片输入。`
-        : `提示：${providerConfig.name} 不原生支持 PDF，插件会先将 PDF 逐页渲染为图片后发送给模型识别。`;
-      if (providerConfig.modelHint) {
-        hintText += `\n⚠️ ${providerConfig.modelHint}`;
-      }
-      hintEl.textContent = hintText;
+      hintEl.textContent = buildProviderHintText(provider, providerConfig);
     }
   } catch {
     if (apiKeyInput) apiKeyInput.value = "";
-    if (modelInput) modelInput.value = providerConfig.defaultModel;
+    if (modelMenulist) modelMenulist.value = providerConfig.defaultModel;
     if (apiBaseInput) apiBaseInput.value = "";
     if (customPromptInput) customPromptInput.value = "";
   }
+
+  refreshModelList(win);
 }
 
 function saveAIProviderConfig(win: Window) {
@@ -721,7 +798,7 @@ function saveAIProviderConfig(win: Window) {
 
   const provider = modelConfig.provider;
   const apiKeyInput = d.getElementById("aiocr-ai-api-key") as HTMLInputElement;
-  const modelInput = d.getElementById("aiocr-ai-model") as HTMLInputElement;
+  const modelMenulist = d.getElementById("aiocr-ai-model") as XUL.MenuList;
   const apiBaseInput = d.getElementById(
     "aiocr-ai-api-base",
   ) as HTMLInputElement;
@@ -732,7 +809,7 @@ function saveAIProviderConfig(win: Window) {
   const configs = JSON.parse((getPref("aiProviderConfigs") as string) || "{}");
   configs[provider] = {
     apiKey: apiKeyInput?.value || "",
-    model: modelInput?.value || "",
+    model: modelMenulist?.value || "",
     apiBase: apiBaseInput?.value || "",
   };
   setPref("aiProviderConfigs", JSON.stringify(configs));
@@ -753,10 +830,78 @@ function saveAIProviderConfig(win: Window) {
     .show();
 }
 
+let customModelFetchSeq = 0;
+
+/**
+ * 拉取自定义引擎 API 地址下的模型列表并填充模型名称下拉框。
+ * 读取表单当前的 API 完整地址与 API Key（未保存也生效）；
+ * 编辑引擎或修改地址/Key 后自动刷新，过期结果按序号丢弃。
+ */
+async function refreshCustomModelList(win: Window) {
+  const d = doc(win);
+  const modelMenulist = d.getElementById(
+    "aiocr-custom-engine-model",
+  ) as XUL.MenuList;
+  const apiUrlInput = d.getElementById(
+    "aiocr-custom-engine-apiurl",
+  ) as HTMLInputElement;
+  const apiKeyInput = d.getElementById(
+    "aiocr-custom-engine-apikey",
+  ) as HTMLInputElement;
+  if (!modelMenulist || !apiUrlInput) return;
+
+  const seq = ++customModelFetchSeq;
+  const apiUrl = apiUrlInput.value.trim();
+  const apiKey = apiKeyInput?.value || "";
+
+  const populate = (models: string[]) => {
+    if (seq !== customModelFetchSeq) return;
+    // 重新读取当前值，避免覆盖用户在拉取期间手动输入的模型名
+    const current = modelMenulist.value || "";
+    const menupopup = modelMenulist.querySelector("menupopup");
+    if (!menupopup) return;
+    while (menupopup.firstChild) {
+      menupopup.removeChild(menupopup.firstChild);
+    }
+    const items = current
+      ? [current, ...models.filter((m) => m !== current)]
+      : models;
+    for (const name of items) {
+      const menuItem = d.createElementNS(
+        "http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul",
+        "menuitem",
+      );
+      menuItem.setAttribute("value", name);
+      menuItem.setAttribute("label", name);
+      menupopup.appendChild(menuItem);
+    }
+    modelMenulist.value = current;
+  };
+
+  populate([]);
+  if (!apiUrl) return;
+  const models = await fetchModelListForEndpoint(apiUrl, apiKey);
+  populate(models);
+}
+
 function initCustomEnginesTab(win: Window) {
   renderCustomEngineList(win);
 
   const d = doc(win);
+
+  // API 完整地址 / API Key 变更后自动刷新模型列表
+  const apiUrlInput = d.getElementById(
+    "aiocr-custom-engine-apiurl",
+  ) as HTMLInputElement;
+  apiUrlInput?.addEventListener("change", () => {
+    refreshCustomModelList(win);
+  });
+  const apiKeyInput = d.getElementById(
+    "aiocr-custom-engine-apikey",
+  ) as HTMLInputElement;
+  apiKeyInput?.addEventListener("change", () => {
+    refreshCustomModelList(win);
+  });
 
   const addBtn = d.getElementById("aiocr-custom-engine-add");
   addBtn?.addEventListener("command", () => {
@@ -952,6 +1097,8 @@ function showCustomEngineForm(win: Window, show: boolean) {
 
 function clearCustomEngineForm(win: Window) {
   const d = doc(win);
+  // 使在途的模型列表拉取失效，避免清空后又被回填
+  customModelFetchSeq++;
   const fields = [
     "aiocr-custom-engine-name",
     "aiocr-custom-engine-apiurl",
@@ -959,8 +1106,17 @@ function clearCustomEngineForm(win: Window) {
     "aiocr-custom-engine-model",
   ];
   for (const id of fields) {
-    const input = d.getElementById(id) as HTMLInputElement;
-    if (input) input.value = "";
+    const input = d.getElementById(id);
+    if (input) (input as any).value = "";
+  }
+  const modelMenulist = d.getElementById(
+    "aiocr-custom-engine-model",
+  ) as XUL.MenuList;
+  const menupopup = modelMenulist?.querySelector("menupopup");
+  if (menupopup) {
+    while (menupopup.firstChild) {
+      menupopup.removeChild(menupopup.firstChild);
+    }
   }
   const maxTokensInput = d.getElementById(
     "aiocr-custom-engine-maxtokens",
@@ -991,7 +1147,7 @@ function fillCustomEngineForm(win: Window, engine: CustomEngineConfig) {
   ) as HTMLInputElement;
   const modelInput = d.getElementById(
     "aiocr-custom-engine-model",
-  ) as HTMLInputElement;
+  ) as XUL.MenuList;
   const maxTokensInput = d.getElementById(
     "aiocr-custom-engine-maxtokens",
   ) as HTMLInputElement;
@@ -1011,6 +1167,8 @@ function fillCustomEngineForm(win: Window, engine: CustomEngineConfig) {
     (saveBtn as any)._editMode = true;
     (saveBtn as any)._editId = engine.id;
   }
+
+  refreshCustomModelList(win);
 }
 
 function getCustomEngineFormData(win: Window): CustomEngineConfig {
@@ -1026,7 +1184,7 @@ function getCustomEngineFormData(win: Window): CustomEngineConfig {
   ) as HTMLInputElement;
   const modelInput = d.getElementById(
     "aiocr-custom-engine-model",
-  ) as HTMLInputElement;
+  ) as XUL.MenuList;
   const maxTokensInput = d.getElementById(
     "aiocr-custom-engine-maxtokens",
   ) as HTMLInputElement;
@@ -1045,6 +1203,16 @@ function getCustomEngineFormData(win: Window): CustomEngineConfig {
   };
 }
 
+/** 自定义引擎的菜单标签：括号内显示当前使用的模型（模型缺失时回退为"自定义"） */
+function customEngineMenuLabel(engine: {
+  name: string;
+  model: string;
+}): string {
+  return engine.model
+    ? `${engine.name} (${engine.model})`
+    : `${engine.name} (自定义)`;
+}
+
 function refreshEngineDropdownAndMenu(win: Window) {
   const d = doc(win);
   const engineMenulist = d.getElementById("aiocr-engine") as XUL.MenuList;
@@ -1053,7 +1221,7 @@ function refreshEngineDropdownAndMenu(win: Window) {
     if (menupopup) {
       menupopup
         .querySelectorAll("[value^='custom-']")
-        .forEach((el) => el.remove());
+        .forEach((el: Element) => el.remove());
 
       const existingCustomSep = menupopup.querySelector(
         ".aiocr-custom-separator",
@@ -1078,7 +1246,7 @@ function refreshEngineDropdownAndMenu(win: Window) {
             "menuitem",
           );
           menuItem.setAttribute("value", engine.id);
-          menuItem.setAttribute("label", `${engine.name} (自定义)`);
+          menuItem.setAttribute("label", customEngineMenuLabel(engine));
           menupopup.appendChild(menuItem);
         }
       } else if (existingCustomSep) {

@@ -12,5 +12,14 @@ export default zotero({
         "@typescript-eslint/no-unused-vars": "off",
       },
     },
+    {
+      // Node 脚本（如 fix-prefs.js）运行于 Node 环境，可用 console
+      files: ["scripts/**/*.js"],
+      languageOptions: {
+        globals: {
+          console: "readonly",
+        },
+      },
+    },
   ],
 });

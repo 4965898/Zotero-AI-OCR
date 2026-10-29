@@ -71,7 +71,7 @@ async function onMainWindowUnload(win: Window): Promise<void> {
 function onShutdown(): void {
   ztoolkit.unregisterAll();
   addon.data.alive = false;
-  // @ts-expect-error
+  // @ts-expect-error addon instance key is not in the Zotero global type
   delete Zotero[addon.data.config.addonInstance];
 }
 

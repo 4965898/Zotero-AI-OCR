@@ -14,7 +14,6 @@ const prefsFile = path.join(buildDir, "prefs.js");
 
 const prefs = [
   { key: "engine", type: "string", value: "PP-OCRv6" },
-  { key: "apiMode", type: "string", value: "sync" },
   { key: "noteNaming", type: "string", value: "default" },
   {
     key: "customNamingTemplate",
@@ -25,6 +24,9 @@ const prefs = [
   { key: "concurrency", type: "integer", value: 3 },
   { key: "endpoints", type: "string", value: "{}" },
   { key: "advancedFeatures", type: "string", value: "{}" },
+  { key: "aiProviderConfigs", type: "string", value: "{}" },
+  { key: "customEngines", type: "string", value: "[]" },
+  { key: "aiCustomPrompt", type: "string", value: "" },
 ];
 
 let content = "";

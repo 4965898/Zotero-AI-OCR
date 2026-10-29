@@ -1,14 +1,19 @@
 import {
   performOCR,
   pdfToImages,
-  callSyncAPI,
   callAsyncAPI,
+  callModelBestAPI,
   extractPagesToTempPdf,
   OCRPageResult,
   ENGINE_ADVANCED_FEATURES,
   ENGINE_MODELS,
   EngineType,
+  OcrCancelledError,
+  requestOcrCancellation,
+  resetOcrCancellation,
+  isOcrCancelled,
 } from "./ocr-engine";
+import { handleBatchAnnotationsOCR } from "./annotation-ocr";
 import {
   getPref,
   setPref,
@@ -25,7 +30,8 @@ const ALL_ENGINES: { value: string; label: string }[] = [
   { value: "MinerU-pipeline", label: "MinerU-pipeline (文档解析)" },
   { value: "MinerU-vlm", label: "MinerU-vlm (推荐文档解析)" },
   { value: "MinerU-HTML", label: "MinerU-HTML (HTML解析)" },
-  { value: "AI-OpenAI", label: "OpenAI (GPT-4o)" },
+  { value: "ModelBest-OCR", label: "面壁智能 MiniCPM-OCR (文档解析)" },
+  { value: "AI-OpenAI", label: "OpenAI" },
   { value: "AI-Gemini", label: "Google Gemini" },
   { value: "AI-xAI", label: "xAI Grok" },
   { value: "AI-OpenRouter", label: "OpenRouter" },
@@ -35,7 +41,6 @@ const ALL_ENGINES: { value: string; label: string }[] = [
   { value: "AI-Alibaba", label: "阿里云百炼" },
   { value: "AI-Ollama", label: "Ollama (本地)" },
   { value: "AI-Groq", label: "Groq" },
-  { value: "AI-Infinigence", label: "无问芯穹" },
   { value: "AI-Mistral", label: "Mistral AI" },
   { value: "AI-ModelScope", label: "魔搭" },
   { value: "AI-Intern", label: "浦源书生" },
@@ -118,6 +123,35 @@ export function registerContextMenu(win: _ZoteroTypes.MainWindow) {
   );
   registerMenuItem(
     win,
+    "zotero-itemmenu-aiocr-cancel",
+    getString("menuitem-cancel-ocr"),
+    menuIcon,
+    () => {
+      requestOcrCancellation();
+      new ztoolkit.ProgressWindow(addon.data.config.addonName, {
+        closeTime: 2500,
+      })
+        .createLine({
+          text: getString("progress-cancel-requested"),
+          type: "default",
+          progress: 100,
+        })
+        .show();
+    },
+  );
+  registerMenuItem(
+    win,
+    "zotero-itemmenu-aiocr-annotation-batch",
+    getString("menuitem-annotation-batch-ocr"),
+    menuIcon,
+    () => {
+      handleBatchAnnotationsOCR().catch((err: any) => {
+        ztoolkit.log(`[AIOCR] Batch annotation OCR failed: ${err.message}`);
+      });
+    },
+  );
+  registerMenuItem(
+    win,
     "zotero-itemmenu-aiocr-switch-engine",
     getString("menuitem-switch-engine"),
     menuIcon,
@@ -135,6 +169,37 @@ export function registerContextMenu(win: _ZoteroTypes.MainWindow) {
 
   refreshEngineMenu();
   refreshAdvancedMenu();
+}
+
+/** 引擎标签：优先取语言文件（engine-<value>），缺失时回退到内置文案。
+ * 注意：id 中的点号必须替换（scaffold 构建的 l10n 重写正则不认点号，
+ * 引擎名 PaddleOCR-VL-1.6 对应键 engine-PaddleOCR-VL-1-6）；
+ * getString 在键缺失时返回 "aiocr-<key>" 形式的占位串，据此判断是否回退 */
+function engineLabel(value: string, fallback: string): string {
+  const key = `engine-${value.replace(/\./g, "-")}`;
+  const localized = getString(key as any);
+  return localized === `aiocr-${key}` ? fallback : localized;
+}
+
+/** 自定义引擎的菜单标签：括号内显示当前使用的模型（模型缺失时回退为"自定义"） */
+function customEngineMenuLabel(engine: {
+  name: string;
+  model: string;
+}): string {
+  return engine.model
+    ? `${engine.name} (${engine.model})`
+    : `${engine.name} (自定义)`;
+}
+
+function createGroupHeader(doc: Document, label: string): XUL.MenuItem {
+  const headerItem = doc.createElementNS(
+    "http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul",
+    "menuitem",
+  ) as XUL.MenuItem;
+  headerItem.setAttribute("label", label);
+  headerItem.setAttribute("disabled", "true");
+  headerItem.style.cssText = "color: #666; font-style: italic;";
+  return headerItem;
 }
 
 export function refreshEngineMenu() {
@@ -159,84 +224,70 @@ export function refreshEngineMenu() {
     menupopup.removeChild(menupopup.firstChild);
   }
 
-  const paddleHeader = doc.createElementNS(
-    "http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul",
-    "menuitem",
-  );
-  paddleHeader.setAttribute("label", "── PaddleOCR ──");
-  paddleHeader.setAttribute("disabled", "true");
-  paddleHeader.style.cssText = "color: #666; font-style: italic;";
-  menupopup.appendChild(paddleHeader);
+  const groups: {
+    headerKey: string;
+    match: (value: string) => boolean;
+  }[] = [
+    {
+      headerKey: "menu-group-paddle",
+      match: (v) => v.startsWith("PP-") || v.startsWith("PaddleOCR"),
+    },
+    { headerKey: "menu-group-mineru", match: (v) => v.startsWith("MinerU") },
+    { headerKey: "menu-group-modelbest", match: (v) => v === "ModelBest-OCR" },
+    { headerKey: "menu-group-ai", match: (v) => v.startsWith("AI-") },
+  ];
 
-  const paddleEngines = ALL_ENGINES.filter(
-    (e) => !e.value.startsWith("MinerU") && !e.value.startsWith("AI-"),
-  );
-  for (const eng of paddleEngines) {
-    menupopup.appendChild(createEngineMenuItem(doc, eng, currentEngine));
-  }
+  let isFirstGroup = true;
+  for (const group of groups) {
+    const engines = ALL_ENGINES.filter((e) => group.match(e.value));
+    if (engines.length === 0) continue;
 
-  const mineruSep = doc.createElementNS(
-    "http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul",
-    "menuseparator",
-  );
-  menupopup.appendChild(mineruSep);
+    if (!isFirstGroup) {
+      menupopup.appendChild(
+        doc.createElementNS(
+          "http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul",
+          "menuseparator",
+        ),
+      );
+    }
+    isFirstGroup = false;
 
-  const mineruHeader = doc.createElementNS(
-    "http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul",
-    "menuitem",
-  );
-  mineruHeader.setAttribute("label", "── MinerU ──");
-  mineruHeader.setAttribute("disabled", "true");
-  mineruHeader.style.cssText = "color: #666; font-style: italic;";
-  menupopup.appendChild(mineruHeader);
+    menupopup.appendChild(
+      createGroupHeader(doc, getString(group.headerKey as any)),
+    );
 
-  const mineruEngines = ALL_ENGINES.filter((e) => e.value.startsWith("MinerU"));
-  for (const eng of mineruEngines) {
-    menupopup.appendChild(createEngineMenuItem(doc, eng, currentEngine));
-  }
-
-  const aiSep = doc.createElementNS(
-    "http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul",
-    "menuseparator",
-  );
-  menupopup.appendChild(aiSep);
-
-  const aiHeader = doc.createElementNS(
-    "http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul",
-    "menuitem",
-  );
-  aiHeader.setAttribute("label", "── AI 视觉模型 ──");
-  aiHeader.setAttribute("disabled", "true");
-  aiHeader.style.cssText = "color: #666; font-style: italic;";
-  menupopup.appendChild(aiHeader);
-
-  const aiEngines = ALL_ENGINES.filter((e) => e.value.startsWith("AI-"));
-  for (const eng of aiEngines) {
-    menupopup.appendChild(createEngineMenuItem(doc, eng, currentEngine));
+    for (const eng of engines) {
+      menupopup.appendChild(
+        createEngineMenuItem(
+          doc,
+          { value: eng.value, label: engineLabel(eng.value, eng.label) },
+          currentEngine,
+        ),
+      );
+    }
   }
 
   const customEngines = getCustomEngines();
   if (customEngines.length > 0) {
-    const customSep = doc.createElementNS(
-      "http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul",
-      "menuseparator",
+    menupopup.appendChild(
+      doc.createElementNS(
+        "http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul",
+        "menuseparator",
+      ),
     );
-    menupopup.appendChild(customSep);
-
-    const customHeader = doc.createElementNS(
-      "http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul",
-      "menuitem",
+    menupopup.appendChild(
+      createGroupHeader(doc, getString("menu-group-custom")),
     );
-    customHeader.setAttribute("label", "── 自定义引擎 ──");
-    customHeader.setAttribute("disabled", "true");
-    customHeader.style.cssText = "color: #666; font-style: italic;";
-    menupopup.appendChild(customHeader);
 
     for (const engine of customEngines) {
       menupopup.appendChild(
         createEngineMenuItem(
           doc,
-          { value: engine.id, label: `${engine.name} (自定义)` },
+          {
+            value: engine.id,
+            // 括号内显示当前使用的模型，便于区分同服务的多个自定义引擎
+            label: customEngineMenuLabel(engine),
+          },
           currentEngine,
         ),
       );
@@ -252,7 +303,7 @@ function createEngineMenuItem(
   const menuItem = doc.createElementNS(
     "http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul",
     "menuitem",
-  );
+  ) as XUL.MenuItem;
   menuItem.setAttribute("label", eng.label);
   menuItem.setAttribute("type", "radio");
   menuItem.setAttribute("name", "aiocr-engine-group");
@@ -300,8 +351,11 @@ export function refreshAdvancedMenu() {
   const headerItem = doc.createElementNS(
     "http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul",
     "menuitem",
+  ) as XUL.MenuItem;
+  headerItem.setAttribute(
+    "label",
+    getString("advanced-engine-header", { args: { engine } }),
   );
-  headerItem.setAttribute("label", `当前引擎: ${engine}`);
   headerItem.setAttribute("disabled", "true");
   headerItem.style.cssText = "font-weight: bold; color: #1976d2;";
   menupopup.appendChild(headerItem);
@@ -311,8 +365,8 @@ export function refreshAdvancedMenu() {
     const infoItem = doc.createElementNS(
       "http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul",
       "menuitem",
-    );
-    infoItem.setAttribute("label", "MinerU 仅支持异步 API");
+    ) as XUL.MenuItem;
+    infoItem.setAttribute("label", getString("menu-mineru-async-only"));
     infoItem.setAttribute("disabled", "true");
     infoItem.style.cssText = "color: #999; font-size: 11px;";
     menupopup.appendChild(infoItem);
@@ -321,8 +375,8 @@ export function refreshAdvancedMenu() {
     const infoItem = doc.createElementNS(
       "http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul",
       "menuitem",
-    );
-    infoItem.setAttribute("label", "该引擎仅支持异步 API");
+    ) as XUL.MenuItem;
+    infoItem.setAttribute("label", getString("menu-async-only"));
     infoItem.setAttribute("disabled", "true");
     infoItem.style.cssText = "color: #999; font-size: 11px;";
     menupopup.appendChild(infoItem);
@@ -361,10 +415,12 @@ export function refreshAdvancedMenu() {
 }
 
 function getSelectedPdfAttachments(): Zotero.Item[] {
-  const items = Zotero.getActiveZoteroPane().getSelectedItems();
+  const pane = Zotero.getActiveZoteroPane();
+  const items = pane ? pane.getSelectedItems() : [];
   const attachments: Zotero.Item[] = [];
 
   for (const item of items) {
+    if (!item) continue;
     if (item.isAttachment()) {
       if (item.attachmentContentType === "application/pdf") {
         attachments.push(item);
@@ -373,6 +429,7 @@ function getSelectedPdfAttachments(): Zotero.Item[] {
       const itemAttachments = item
         .getAttachments()
         .map((id: number) => Zotero.Items.get(id))
+        .filter((att: Zotero.Item | false): att is Zotero.Item => !!att)
         .filter(
           (att: Zotero.Item) =>
             att.isAttachment() &&
@@ -383,6 +440,11 @@ function getSelectedPdfAttachments(): Zotero.Item[] {
   }
 
   return attachments;
+}
+
+/** 单名创作者取 name，常规创作者取 lastName（Creator 联合类型的统一取值） */
+function creatorDisplayName(creator: any): string {
+  return creator.lastName || creator.name || "";
 }
 
 async function getPdfPageCount(filePath: string): Promise<number> {
@@ -415,11 +477,11 @@ function generateNoteTitle(
       const creators = parentItem.getCreators();
       let firstCreator = "";
       if (creators.length === 1) {
-        firstCreator = creators[0].lastName || creators[0].name || "";
+        firstCreator = creatorDisplayName(creators[0]);
       } else if (creators.length === 2) {
-        firstCreator = `${creators[0].lastName || creators[0].name || ""} and ${creators[1].lastName || creators[1].name || ""}`;
+        firstCreator = `${creatorDisplayName(creators[0])} and ${creatorDisplayName(creators[1])}`;
       } else if (creators.length > 2) {
-        firstCreator = `${creators[0].lastName || creators[0].name || ""} et al.`;
+        firstCreator = `${creatorDisplayName(creators[0])} et al.`;
       }
 
       const year = parentItem.getField("year") || "";
@@ -575,11 +637,11 @@ function resolveNamingTemplate(
       case "firstCreator": {
         const creators = parentItem.getCreators();
         if (creators.length === 1) {
-          value = creators[0].lastName || creators[0].name || "";
+          value = creatorDisplayName(creators[0]);
         } else if (creators.length === 2) {
-          value = `${creators[0].lastName || creators[0].name || ""} and ${creators[1].lastName || creators[1].name || ""}`;
+          value = `${creatorDisplayName(creators[0])} and ${creatorDisplayName(creators[1])}`;
         } else if (creators.length > 2) {
-          value = `${creators[0].lastName || creators[0].name || ""} et al.`;
+          value = `${creatorDisplayName(creators[0])} et al.`;
         }
         break;
       }
@@ -647,6 +709,7 @@ function resolveNamingTemplate(
 }
 
 async function handleSingleOCR() {
+  resetOcrCancellation();
   const attachments = getSelectedPdfAttachments();
   if (attachments.length === 0) {
     new ztoolkit.ProgressWindow(addon.data.config.addonName)
@@ -664,6 +727,7 @@ async function handleSingleOCR() {
 }
 
 async function handleBatchOCR() {
+  resetOcrCancellation();
   const attachments = getSelectedPdfAttachments();
   if (attachments.length === 0) {
     new ztoolkit.ProgressWindow(addon.data.config.addonName)
@@ -679,6 +743,7 @@ async function handleBatchOCR() {
   const total = attachments.length;
   let success = 0;
   let failed = 0;
+  let cancelled = false;
 
   const progressWin = new ztoolkit.ProgressWindow(addon.data.config.addonName, {
     closeOnClick: true,
@@ -694,6 +759,10 @@ async function handleBatchOCR() {
     .show();
 
   for (let i = 0; i < attachments.length; i++) {
+    if (isOcrCancelled()) {
+      cancelled = true;
+      break;
+    }
     const att = attachments[i];
     const name = truncateName(att.getDisplayTitle());
 
@@ -712,21 +781,33 @@ async function handleBatchOCR() {
       await processOCRForAttachment(att, true);
       success++;
     } catch (e: any) {
+      if (e instanceof OcrCancelledError) {
+        cancelled = true;
+        break;
+      }
       ztoolkit.log(`Batch OCR failed for ${name}:`, e);
       failed++;
     }
   }
 
-  progressWin.changeLine({
-    text: getString("progress-batch-done", {
-      args: {
-        success: String(success),
-        failed: String(failed),
-      },
-    }),
-    type: failed > 0 ? "fail" : "success",
-    progress: 100,
-  });
+  if (cancelled) {
+    progressWin.changeLine({
+      text: getString("progress-cancelled"),
+      type: "default",
+      progress: 100,
+    });
+  } else {
+    progressWin.changeLine({
+      text: getString("progress-batch-done", {
+        args: {
+          success: String(success),
+          failed: String(failed),
+        },
+      }),
+      type: failed > 0 ? "fail" : "success",
+      progress: 100,
+    });
+  }
   progressWin.startCloseTimer(5000);
 }
 
@@ -811,12 +892,12 @@ async function handlePageRangeOCR() {
 
   const input = { value: "" };
   const ok = Services.prompt.prompt(
-    null,
+    null as any,
     getString("menuitem-page-range-ocr"),
     promptMsg,
     input,
-    null,
-    {},
+    null as any,
+    {} as any,
   );
 
   if (!ok || !input.value.trim()) return;
@@ -842,6 +923,24 @@ function pagesHaveText(pages: OCRPageResult[]): boolean {
   return pages.some((p) => p.markdown.trim().length > 0);
 }
 
+/**
+ * 以"直接上传文件"方式调用当前引擎。
+ * 面壁智能走其专用接口（单图同步 / PDF 异步任务，服务端逐页解析，天然支持加密 PDF）；
+ * PaddleOCR v1.7.0 起仅支持异步 API。
+ */
+function callPdfUploadEngine(
+  engine: EngineType,
+  modelConfig: any,
+  filePath: string,
+  isPdf: boolean,
+  onProgress?: (current: number, total: number) => void,
+): Promise<OCRPageResult[]> {
+  if ((modelConfig as any).platform === "modelbest") {
+    return callModelBestAPI(engine, filePath, isPdf, onProgress);
+  }
+  return callAsyncAPI(engine, filePath, isPdf, onProgress);
+}
+
 async function tryOcrPageRangeViaPdfUpload(
   filePath: string,
   engine: EngineType,
@@ -852,8 +951,6 @@ async function tryOcrPageRangeViaPdfUpload(
   let tempPdfPath: string | null = null;
   try {
     tempPdfPath = await extractPagesToTempPdf(filePath, pageNumbers);
-    const isAsyncOnly = modelConfig.asyncOnly === true;
-    const apiMode = getPref("apiMode") as string;
     const onProgress = (current: number, total: number) => {
       progressWin?.changeLine({
         text: getString("progress-page-range-page", {
@@ -862,10 +959,13 @@ async function tryOcrPageRangeViaPdfUpload(
         progress: Math.round((current / Math.max(total, 1)) * 90),
       });
     };
-    const pages =
-      isAsyncOnly || apiMode === "async"
-        ? await callAsyncAPI(engine, tempPdfPath, true, onProgress)
-        : await callSyncAPI(engine, tempPdfPath, true);
+    const pages = await callPdfUploadEngine(
+      engine,
+      modelConfig,
+      tempPdfPath,
+      true,
+      onProgress,
+    );
     if (pages.length === 0) {
       throw new Error("OCR result has no pages");
     }
@@ -900,8 +1000,6 @@ async function ocrPageRangeViaFullPdf(
   pageNumbers: number[],
   progressWin: any,
 ): Promise<OCRPageResult[]> {
-  const isAsyncOnly = modelConfig.asyncOnly === true;
-  const apiMode = getPref("apiMode") as string;
   const onProgress = (current: number, total: number) => {
     progressWin?.changeLine({
       text: getString("progress-page-range-page", {
@@ -910,10 +1008,13 @@ async function ocrPageRangeViaFullPdf(
       progress: Math.round((current / Math.max(total, 1)) * 90),
     });
   };
-  const allPages =
-    isAsyncOnly || apiMode === "async"
-      ? await callAsyncAPI(engine, filePath, true, onProgress)
-      : await callSyncAPI(engine, filePath, true);
+  const allPages = await callPdfUploadEngine(
+    engine,
+    modelConfig,
+    filePath,
+    true,
+    onProgress,
+  );
   const requested = new Set(pageNumbers);
   const filtered = allPages.filter((p) => requested.has(p.pageNumber));
   ztoolkit.log(
@@ -926,6 +1027,7 @@ async function processPageRangeOCR(
   attachment: Zotero.Item,
   pageNumbers: number[],
 ): Promise<void> {
+  resetOcrCancellation();
   const progressWin = new ztoolkit.ProgressWindow(addon.data.config.addonName, {
     closeOnClick: true,
     closeTime: -1,
@@ -943,12 +1045,15 @@ async function processPageRangeOCR(
 
     const engine = (getPref("engine") as string) || "PP-OCRv6";
     const modelConfig = ENGINE_MODELS[engine as EngineType];
-    const isPaddleOCR =
-      modelConfig && (modelConfig as any).platform === "paddleocr";
+    // 支持"直接上传 PDF"链路的引擎：PaddleOCR 与面壁智能
+    const isDirectPdfEngine =
+      modelConfig &&
+      ((modelConfig as any).platform === "paddleocr" ||
+        (modelConfig as any).platform === "modelbest");
 
     const allMarkdownParts: string[] = [];
 
-    if (isPaddleOCR) {
+    if (isDirectPdfEngine) {
       let pages = await tryOcrPageRangeViaPdfUpload(
         filePath,
         engine as EngineType,
@@ -1019,11 +1124,13 @@ async function processPageRangeOCR(
 
           let pageMarkdown = "";
 
-          if (isPaddleOCR) {
-            const isAsyncOnly = (modelConfig as any).asyncOnly === true;
-            const pages = isAsyncOnly
-              ? await callAsyncAPI(engine as EngineType, tempPath, false)
-              : await callSyncAPI(engine as EngineType, tempPath, false);
+          if (isDirectPdfEngine) {
+            const pages = await callPdfUploadEngine(
+              engine as EngineType,
+              modelConfig,
+              tempPath,
+              false,
+            );
             pageMarkdown = pages.map((p) => p.markdown).join("\n");
           } else {
             const result = await performOCR(
@@ -1055,7 +1162,7 @@ async function processPageRangeOCR(
 
     const parentItem = Zotero.Items.get(
       attachment.parentItemID || attachment.id,
-    );
+    ) as Zotero.Item;
     const pageRangeStr = pageNumbers.join(", ");
     const noteTitle = generateNoteTitle(
       attachment,
@@ -1078,14 +1185,23 @@ async function processPageRangeOCR(
     });
     progressWin.startCloseTimer(3000);
   } catch (e: any) {
-    progressWin.changeLine({
-      text: getString("progress-page-range-failed", {
-        args: { error: truncateName(e.message || String(e), 60) },
-      }),
-      type: "fail",
-      progress: 100,
-    });
-    progressWin.startCloseTimer(5000);
+    if (e instanceof OcrCancelledError) {
+      progressWin.changeLine({
+        text: getString("progress-cancelled"),
+        type: "default",
+        progress: 100,
+      });
+      progressWin.startCloseTimer(3000);
+    } else {
+      progressWin.changeLine({
+        text: getString("progress-page-range-failed", {
+          args: { error: truncateName(e.message || String(e), 60) },
+        }),
+        type: "fail",
+        progress: 100,
+      });
+      progressWin.startCloseTimer(5000);
+    }
   }
 }
 
@@ -1116,20 +1232,6 @@ export async function processOCRForAttachment(
     const modelConfig = ENGINE_MODELS[engine as EngineType];
     const isMinerU = modelConfig && (modelConfig as any).platform === "mineru";
     const isAI = modelConfig && (modelConfig as any).platform === "ai";
-    const isAsyncOnly = modelConfig && (modelConfig as any).asyncOnly === true;
-    const apiMode = getPref("apiMode") as string;
-
-    if (!isMinerU && !isAI && !isAsyncOnly && apiMode === "sync") {
-      const pageCount = await getPdfPageCount(filePath);
-      if (pageCount > 0) {
-        progressWin?.changeLine({
-          text: getString("progress-ocr-preparing", {
-            args: { pages: String(pageCount) },
-          }),
-          progress: 10,
-        });
-      }
-    }
 
     const result = await performOCR(
       filePath,
@@ -1140,10 +1242,7 @@ export async function processOCRForAttachment(
           text: getString("progress-ocr-page", {
             args: { current: String(current), total: String(total) },
           }),
-          progress:
-            !isMinerU && !isAI && !isAsyncOnly && apiMode === "sync"
-              ? Math.round((current / total) * 80) + 10
-              : Math.round((current / total) * 100),
+          progress: Math.round((current / total) * 100),
         });
       },
       attachment.id,
@@ -1151,7 +1250,7 @@ export async function processOCRForAttachment(
 
     const parentItem = Zotero.Items.get(
       attachment.parentItemID || attachment.id,
-    );
+    ) as Zotero.Item;
     const noteTitle = generateNoteTitle(attachment, result.engine);
     const noteContent = `<h1>${noteTitle}</h1>\n${markdownToHTML(result.fullMarkdown)}`;
 
@@ -1171,14 +1270,23 @@ export async function processOCRForAttachment(
     progressWin?.startCloseTimer(3000);
   } catch (e: any) {
     if (progressWin) {
-      progressWin.changeLine({
-        text: getString("progress-ocr-failed", {
-          args: { error: truncateName(e.message || String(e), 60) },
-        }),
-        type: "fail",
-        progress: 100,
-      });
-      progressWin.startCloseTimer(5000);
+      if (e instanceof OcrCancelledError) {
+        progressWin.changeLine({
+          text: getString("progress-cancelled"),
+          type: "default",
+          progress: 100,
+        });
+        progressWin.startCloseTimer(3000);
+      } else {
+        progressWin.changeLine({
+          text: getString("progress-ocr-failed", {
+            args: { error: truncateName(e.message || String(e), 60) },
+          }),
+          type: "fail",
+          progress: 100,
+        });
+        progressWin.startCloseTimer(5000);
+      }
     }
     throw e;
   }

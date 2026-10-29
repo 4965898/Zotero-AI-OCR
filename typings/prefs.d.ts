@@ -7,13 +7,15 @@ declare namespace _ZoteroTypes {
   interface Prefs {
     PluginPrefsMap: {
       engine: string;
-      apiMode: string;
       noteNaming: string;
       customNamingTemplate: string;
       autoOCR: boolean;
       concurrency: number;
       endpoints: string;
       advancedFeatures: string;
+      aiProviderConfigs: string;
+      customEngines: string;
+      aiCustomPrompt: string;
     };
   }
 }

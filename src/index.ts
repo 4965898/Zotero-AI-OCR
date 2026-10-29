@@ -4,13 +4,13 @@ import { config } from "../package.json";
 
 const basicTool = new BasicTool();
 
-// @ts-expect-error
+// @ts-expect-error addon instance key is not in the Zotero global type
 if (!basicTool.getGlobal("Zotero")[config.addonInstance]) {
   _globalThis.addon = new Addon();
   defineGlobal("ztoolkit", () => {
     return _globalThis.addon.data.ztoolkit;
   });
-  // @ts-expect-error
+  // @ts-expect-error addon instance key is not in the Zotero global type
   Zotero[config.addonInstance] = addon;
 }
 

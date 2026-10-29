@@ -126,17 +126,6 @@ export function setAdvancedFeature(
   setAdvancedFeatures(map);
 }
 
-export function getEnabledAdvancedFeatures(engine: string): {
-  [feature: string]: boolean;
-} {
-  const features = getAdvancedFeaturesForEngine(engine);
-  const result: { [feature: string]: boolean } = {};
-  for (const [key, val] of Object.entries(features)) {
-    if (val) result[key] = val;
-  }
-  return result;
-}
-
 export interface CustomEngineConfig {
   id: string;
   name: string;
