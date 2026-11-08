@@ -6,6 +6,7 @@ import {
   CustomEngineConfig,
 } from "../utils/prefs";
 import { getString } from "../utils/locale";
+import { chunkArray } from "../utils/toc-algorithms";
 import { PDFDocument } from "pdf-lib";
 
 export const AI_PROVIDER_CONFIGS: {
@@ -206,7 +207,7 @@ export function resetOcrCancellation() {
   ocrCancelRequested = false;
 }
 
-function throwIfCancelled() {
+export function throwIfCancelled() {
   if (ocrCancelRequested) throw new OcrCancelledError();
 }
 
@@ -638,11 +639,25 @@ async function readFileAsBase64(filePath: string): Promise<string> {
   return uint8ArrayToBase64(bytes);
 }
 
+/**
+ * 读取 PDF 文件字节并归一化为当前域的 Uint8Array。
+ * IOUtils.read 返回的字节数组来自 Zotero 特权域，跨 compartment 时
+ * pdf-lib 的 instanceof 校验会失败（getType 把它报成 "NaN"），需复制为本域实例。
+ */
+export async function readPdfFileBytes(filePath: string): Promise<Uint8Array> {
+  const bytes: any = await IOUtils.read(filePath);
+  if (bytes instanceof Uint8Array) return bytes;
+  ztoolkit.log(
+    `[AIOCR] readPdfFileBytes: bytes from IOUtils are cross-realm (${bytes?.constructor?.name}), copying into plugin realm`,
+  );
+  return new Uint8Array(bytes);
+}
+
 export async function extractPagesToTempPdf(
   filePath: string,
   pageNumbers: number[],
 ): Promise<string> {
-  const bytes = await IOUtils.read(filePath);
+  const bytes = await readPdfFileBytes(filePath);
   const srcDoc = await PDFDocument.load(bytes, { ignoreEncryption: true });
   if (srcDoc.isEncrypted) {
     throw new Error(
@@ -1574,6 +1589,7 @@ async function renderPagesFromLoadedDocument(
   iframeWindow: any,
   pageNumbers?: number[],
   onProgress?: (current: number, total: number) => void,
+  renderScale?: number,
 ): Promise<{ base64: string; pageNumber: number }[]> {
   const Cu = (Components as any).utils;
   const doc = await waitForPdfDocument(iframeWindow);
@@ -1606,7 +1622,7 @@ async function renderPagesFromLoadedDocument(
     const waivedPage = Cu.waiveXrays(page);
 
     const vpOpts = new iframeWindow.Object();
-    vpOpts.scale = 2;
+    vpOpts.scale = renderScale && renderScale > 0 ? renderScale : 2;
     const viewport = waivedPage.getViewport(vpOpts);
     const waivedViewport = Cu.waiveXrays(viewport);
     const vpWidth = waivedViewport.width;
@@ -1646,6 +1662,7 @@ export async function pdfToImages(
   onProgress?: (current: number, total: number) => void,
   itemId?: number,
   pageNumbers?: number[],
+  renderScale?: number,
 ): Promise<{ base64: string; pageNumber: number }[]> {
   let openedReader: any = null;
   let shouldCloseReader = false;
@@ -1766,6 +1783,7 @@ export async function pdfToImages(
           targetIframeWindow,
           pageNumbers,
           onProgress,
+          renderScale,
         );
         ztoolkit.log(
           `[AIOCR] pdfToImages: loaded-document rendering succeeded, ${images.length} pages`,
@@ -2307,31 +2325,67 @@ async function renderPdfIframeSandbox(
   }));
 }
 
-async function callAIOneImage(
-  providerConfig: (typeof AI_PROVIDER_CONFIGS)[string],
-  provider: string,
-  apiKey: string,
-  model: string,
-  apiBase: string,
-  imageBase64: string,
-  mimeType: string,
-  prompt: string,
+/** 通用视觉对话的图文段：text 与 imageBase64 二选一，可按任意顺序/数量混排 */
+export interface VisionChatPart {
+  text?: string;
+  imageBase64?: string;
+  mimeType?: string;
+}
+
+/** 通用视觉对话配置：URL 必须是完整端点地址（…/chat/completions 或 …:generateContent），不含 key 参数 */
+export interface VisionChatConfig {
+  name: string;
+  apiFormat: "openai" | "gemini";
+  url: string;
+  apiKey: string;
+  model?: string;
+  modelHint?: string;
+  authHeaderFormat?: "bearer" | "api-key";
+  tokenParam?: "max_tokens" | "max_completion_tokens";
+  maxTokens?: number;
+  temperature?: number;
+  streamParam?: boolean;
+  thinkingDisabled?: Record<string, any>;
+  /** 是否启用配额/模型名等友好错误提示（仅内置 AI 平台开启） */
+  detailedErrorHints?: boolean;
+}
+
+/**
+ * 通用"多段图文 → 文本"视觉对话调用。
+ * OCR 单图路径与目录生成（prompt 夹图、多图 few-shot）共用此核心。
+ */
+export async function callVisionChat(
+  config: VisionChatConfig,
+  parts: VisionChatPart[],
+  opts?: { maxTokens?: number; temperature?: number },
 ): Promise<string> {
   let markdown = "";
 
-  if (providerConfig.apiFormat === "gemini") {
-    const baseUrl = apiBase.replace(/\/+$/, "");
-    const url = `${baseUrl}/models/${model}:generateContent?key=${apiKey}`;
+  if (config.apiFormat === "gemini") {
+    const separator = config.url.includes("?") ? "&" : "?";
+    const url = `${config.url}${separator}key=${config.apiKey}`;
+    const generationParts: any[] = [];
+    for (const part of parts) {
+      if (part.text !== undefined) {
+        generationParts.push({ text: part.text });
+      }
+      if (part.imageBase64 !== undefined) {
+        generationParts.push({
+          inlineData: {
+            mimeType: part.mimeType || "image/png",
+            data: part.imageBase64,
+          },
+        });
+      }
+    }
     const requestBody = {
-      contents: [
-        {
-          parts: [
-            { text: prompt },
-            { inlineData: { mimeType, data: imageBase64 } },
-          ],
-        },
-      ],
-      generationConfig: { temperature: 0.1, maxOutputTokens: 8192 },
+      contents: [{ parts: generationParts }],
+      generationConfig: {
+        temperature:
+          opts?.temperature ??
+          (config.temperature !== undefined ? config.temperature : 0.1),
+        maxOutputTokens: opts?.maxTokens ?? config.maxTokens ?? 8192,
+      },
     };
     let response: any;
     try {
@@ -2342,51 +2396,43 @@ async function callAIOneImage(
         timeout: 300000,
       });
     } catch (e: any) {
-      throw describeHttpError(e, providerConfig.name);
+      throw describeHttpError(e, config.name);
     }
     const data = response.response;
     if (data.error) throw new Error(data.error.message || "Gemini API error");
     const candidates = data.candidates || [];
     if (candidates.length > 0 && candidates[0].content?.parts?.length > 0) {
       // 过滤思考 parts（thought: true），再合并正文
-      markdown = stripThinkingContent(
-        candidates[0].content.parts
-          .filter((p: any) => !p.thought)
-          .map((p: any) => p.text || "")
-          .join("\n"),
-      );
+      markdown = candidates[0].content.parts
+        .filter((p: any) => !p.thought)
+        .map((p: any) => p.text || "")
+        .join("\n");
     }
   } else {
-    const baseUrl = apiBase.replace(/\/+$/, "");
-    const url = `${baseUrl}/chat/completions`;
-    const thinkingDisabled = THINKING_DISABLED_PARAMS[provider];
+    const thinkingDisabled = config.thinkingDisabled;
 
     const attempt = async (withThinkingDisabled: boolean): Promise<string> => {
-      const requestBody: Record<string, any> = {
-        model,
-        messages: [
-          {
-            role: "user",
-            content: [
-              { type: "text", text: prompt },
-              {
-                type: "image_url",
-                image_url: {
-                  url: `data:${mimeType};base64,${imageBase64}`,
-                },
+      const contentParts = parts.map((part) =>
+        part.text !== undefined
+          ? { type: "text", text: part.text }
+          : {
+              type: "image_url",
+              image_url: {
+                url: `data:${part.mimeType || "image/png"};base64,${part.imageBase64}`,
               },
-            ],
-          },
-        ],
+            },
+      );
+      const requestBody: Record<string, any> = {
+        model: config.model,
+        messages: [{ role: "user", content: contentParts }],
       };
-      requestBody[providerConfig.tokenParam || "max_tokens"] =
-        providerConfig.maxTokens || 4096;
+      requestBody[config.tokenParam || "max_tokens"] =
+        opts?.maxTokens ?? config.maxTokens ?? 4096;
       requestBody.temperature =
-        providerConfig.temperature !== undefined
-          ? providerConfig.temperature
-          : 0.1;
-      if (providerConfig.streamParam !== undefined) {
-        requestBody.stream = providerConfig.streamParam;
+        opts?.temperature ??
+        (config.temperature !== undefined ? config.temperature : 0.1);
+      if (config.streamParam !== undefined) {
+        requestBody.stream = config.streamParam;
       }
       if (withThinkingDisabled && thinkingDisabled) {
         Object.assign(requestBody, thinkingDisabled);
@@ -2394,46 +2440,48 @@ async function callAIOneImage(
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
       };
-      if (apiKey) {
-        if (providerConfig.authHeaderFormat === "api-key") {
-          headers["api-key"] = apiKey;
+      if (config.apiKey) {
+        if (config.authHeaderFormat === "api-key") {
+          headers["api-key"] = config.apiKey;
         } else {
-          headers["Authorization"] = `Bearer ${apiKey}`;
+          headers["Authorization"] = `Bearer ${config.apiKey}`;
         }
       }
       let response: any;
       try {
-        response = await httpRequestWithRetry("POST", url, {
+        response = await httpRequestWithRetry("POST", config.url, {
           body: JSON.stringify(requestBody),
           headers,
           responseType: "json",
           timeout: 300000,
         });
       } catch (e: any) {
-        throw describeHttpError(e, providerConfig.name);
+        throw describeHttpError(e, config.name);
       }
       const data = response.response;
       if (data.error) {
         const errMsg = data.error.message || "API error";
-        const errType = data.error.type || "";
         const errCode = data.error.code || "";
-        if (
-          errCode === "insufficient_quota" ||
-          errMsg.includes("quota") ||
-          errMsg.includes("billing")
-        ) {
-          throw new Error(
-            `API 配额不足：${errMsg}\n请检查您的 ${providerConfig.name} 账户余额和计费状态。`,
-          );
-        }
-        if (
-          errMsg.includes("model") ||
-          errMsg.includes("not found") ||
-          errMsg.includes("does not exist")
-        ) {
-          throw new Error(
-            `模型不可用：${errMsg}\n请检查模型名称是否正确。${providerConfig.modelHint ? "\n" + providerConfig.modelHint : ""}`,
-          );
+        if (config.detailedErrorHints) {
+          const errType = data.error.type || "";
+          if (
+            errCode === "insufficient_quota" ||
+            errMsg.includes("quota") ||
+            errMsg.includes("billing")
+          ) {
+            throw new Error(
+              `API 配额不足：${errMsg}\n请检查您的 ${config.name} 账户余额和计费状态。`,
+            );
+          }
+          if (
+            errMsg.includes("model") ||
+            errMsg.includes("not found") ||
+            errMsg.includes("does not exist")
+          ) {
+            throw new Error(
+              `模型不可用：${errMsg}\n请检查模型名称是否正确。${config.modelHint ? "\n" + config.modelHint : ""}`,
+            );
+          }
         }
         throw new Error(errMsg);
       }
@@ -2450,17 +2498,48 @@ async function callAIOneImage(
       if (thinkingDisabled) {
         // 部分平台/模型不支持关闭思考参数，去掉参数重试一次
         ztoolkit.log(
-          `[AIOCR] callAIOneImage: request with thinking-disable params failed (${e.message}), retrying without them`,
+          `[AIOCR] callVisionChat: request with thinking-disable params failed (${e.message}), retrying without them`,
         );
         markdown = await attempt(false);
       } else {
         throw e;
       }
     }
-    markdown = stripThinkingContent(markdown);
   }
 
-  return markdown;
+  return stripThinkingContent(markdown);
+}
+
+async function callAIOneImage(
+  providerConfig: (typeof AI_PROVIDER_CONFIGS)[string],
+  provider: string,
+  apiKey: string,
+  model: string,
+  apiBase: string,
+  imageBase64: string,
+  mimeType: string,
+  prompt: string,
+): Promise<string> {
+  const baseUrl = apiBase.replace(/\/+$/, "");
+  const config: VisionChatConfig = {
+    name: providerConfig.name,
+    apiFormat: providerConfig.apiFormat,
+    url:
+      providerConfig.apiFormat === "gemini"
+        ? `${baseUrl}/models/${model}:generateContent`
+        : `${baseUrl}/chat/completions`,
+    apiKey,
+    model,
+    modelHint: providerConfig.modelHint,
+    authHeaderFormat: providerConfig.authHeaderFormat,
+    tokenParam: providerConfig.tokenParam,
+    maxTokens: providerConfig.maxTokens,
+    temperature: providerConfig.temperature,
+    streamParam: providerConfig.streamParam,
+    thinkingDisabled: THINKING_DISABLED_PARAMS[provider],
+    detailedErrorHints: true,
+  };
+  return callVisionChat(config, [{ text: prompt }, { imageBase64, mimeType }]);
 }
 
 export function getAIProviderConfig(engine: string): {
@@ -2706,108 +2785,196 @@ async function callCustomOneImage(
   mimeType: string,
   prompt: string,
 ): Promise<string> {
-  let markdown = "";
   const raw = customEngine.apiUrl.trim().replace(/\/+$/, "");
   const isGemini = isGeminiUrl(raw);
-
-  if (isGemini) {
-    const url = raw;
-    const separator = url.includes("?") ? "&" : "?";
-    const fullUrl = `${url}${separator}key=${customEngine.apiKey}`;
-    const requestBody = {
-      contents: [
-        {
-          parts: [
-            { text: prompt },
-            { inlineData: { mimeType, data: imageBase64 } },
-          ],
-        },
-      ],
-      generationConfig: {
-        temperature: customEngine.temperature,
-        maxOutputTokens: customEngine.maxTokens,
-      },
-    };
-    let response: any;
-    try {
-      response = await httpRequestWithRetry("POST", fullUrl, {
-        body: JSON.stringify(requestBody),
-        headers: { "Content-Type": "application/json" },
-        responseType: "json",
-        timeout: 300000,
-      });
-    } catch (e: any) {
-      throw describeHttpError(e, customEngine.name);
-    }
-    const data = response.response;
-    if (data.error) throw new Error(data.error.message || "Gemini API error");
-    const candidates = data.candidates || [];
-    if (candidates.length > 0 && candidates[0].content?.parts?.length > 0) {
-      // 过滤思考 parts（thought: true），再合并正文
-      markdown = candidates[0].content.parts
-        .filter((p: any) => !p.thought)
-        .map((p: any) => p.text || "")
-        .join("\n");
-    }
-  } else {
-    // 地址兼容两种填法：裸 base（自动补 /chat/completions，与模型列表获取
-    // 的归一化规则一致）或完整端点地址
-    const url = /\/chat\/completions(\?.*)?$/.test(raw)
+  // 地址兼容两种填法：裸 base（自动补 /chat/completions，与模型列表获取
+  // 的归一化规则一致）或完整端点地址
+  const config: VisionChatConfig = {
+    name: customEngine.name,
+    apiFormat: isGemini ? "gemini" : "openai",
+    url: isGemini
       ? raw
-      : `${raw}/chat/completions`;
-    const requestBody: Record<string, any> = {
-      model: customEngine.model,
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "text", text: prompt },
-            {
-              type: "image_url",
-              image_url: {
-                url: `data:${mimeType};base64,${imageBase64}`,
-              },
-            },
-          ],
-        },
-      ],
-      max_tokens: customEngine.maxTokens,
-      temperature: customEngine.temperature,
-    };
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
-    if (customEngine.apiKey) {
-      headers["Authorization"] = `Bearer ${customEngine.apiKey}`;
-    }
-    let response: any;
-    try {
-      response = await httpRequestWithRetry("POST", url, {
-        body: JSON.stringify(requestBody),
-        headers,
-        responseType: "json",
-        timeout: 300000,
-      });
-    } catch (e: any) {
-      throw describeHttpError(e, customEngine.name);
-    }
-    const data = response.response;
-    if (data.error) {
-      const errMsg = data.error.message || "API error";
-      throw new Error(errMsg);
-    }
-    const choices = data.choices || [];
-    if (choices.length > 0 && choices[0].message?.content) {
-      markdown = choices[0].message.content;
-    }
-  }
-
-  // 自定义引擎同样剥离思考内容
-  return stripThinkingContent(markdown);
+      : /\/chat\/completions(\?.*)?$/.test(raw)
+        ? raw
+        : `${raw}/chat/completions`,
+    apiKey: customEngine.apiKey,
+    model: customEngine.model,
+    maxTokens: customEngine.maxTokens,
+    temperature: customEngine.temperature,
+  };
+  // 自定义引擎同样剥离思考内容（callVisionChat 内部统一处理）
+  return callVisionChat(config, [{ text: prompt }, { imageBase64, mimeType }]);
 }
 
 function isGeminiUrl(url: string): boolean {
   return url.includes("generativelanguage.googleapis.com");
+}
+
+/**
+ * 为指定引擎构建通用视觉对话配置（目录生成等非 OCR 功能复用）。
+ * 返回 null 表示该引擎不是 AI 视觉/自定义引擎；配置缺失时抛出与 OCR 路径一致的错误。
+ */
+export function getVisionChatConfigForEngine(
+  engine: string,
+): VisionChatConfig | null {
+  if (engine.startsWith("custom-")) {
+    const customEngine = getCustomEngineById(engine.slice("custom-".length));
+    if (!customEngine) {
+      throw new Error(`自定义引擎未找到: ${engine}`);
+    }
+    if (!customEngine.apiKey && !isGeminiUrl(customEngine.apiUrl)) {
+      throw new Error(
+        `API Key 未配置。请在偏好设置中为自定义引擎「${customEngine.name}」设置 API Key。`,
+      );
+    }
+    const raw = customEngine.apiUrl.trim().replace(/\/+$/, "");
+    const isGemini = isGeminiUrl(raw);
+    return {
+      name: customEngine.name,
+      apiFormat: isGemini ? "gemini" : "openai",
+      url: isGemini
+        ? raw
+        : /\/chat\/completions(\?.*)?$/.test(raw)
+          ? raw
+          : `${raw}/chat/completions`,
+      apiKey: customEngine.apiKey,
+      model: customEngine.model,
+      maxTokens: customEngine.maxTokens,
+      temperature: customEngine.temperature,
+    };
+  }
+
+  const modelConfig = ENGINE_MODELS[engine as EngineType] as any;
+  if (!modelConfig || modelConfig.platform !== "ai") {
+    return null;
+  }
+  const provider = modelConfig.provider;
+  const providerConfig = AI_PROVIDER_CONFIGS[provider];
+  if (!providerConfig) throw new Error(`Unknown AI provider: ${provider}`);
+
+  const { apiKey, model, apiBase } = getAIProviderConfig(engine);
+  if (!apiKey && provider !== "ollama") {
+    throw new Error(
+      `API Key not configured for ${providerConfig.name}. Please set it in preferences.`,
+    );
+  }
+  const baseUrl = apiBase.replace(/\/+$/, "");
+  return {
+    name: providerConfig.name,
+    apiFormat: providerConfig.apiFormat,
+    url:
+      providerConfig.apiFormat === "gemini"
+        ? `${baseUrl}/models/${model}:generateContent`
+        : `${baseUrl}/chat/completions`,
+    apiKey,
+    model,
+    modelHint: providerConfig.modelHint,
+    authHeaderFormat: providerConfig.authHeaderFormat,
+    tokenParam: providerConfig.tokenParam,
+    maxTokens: providerConfig.maxTokens,
+    temperature: providerConfig.temperature,
+    streamParam: providerConfig.streamParam,
+    thinkingDisabled: THINKING_DISABLED_PARAMS[provider],
+    detailedErrorHints: true,
+  };
+}
+
+/**
+ * 读取 PDF 物理页数（正则匹配 /Type /Page，避免加载 pdf.js）。
+ * 从 context-menu.ts 移入，供目录生成等模块共用。
+ */
+export async function getPdfPageCount(filePath: string): Promise<number> {
+  try {
+    const bytes = await IOUtils.read(filePath);
+    const text = new TextDecoder().decode(bytes);
+    const matches = text.match(/\/Type\s*\/Page[^s]/g);
+    return matches ? matches.length : 0;
+  } catch {
+    return 0;
+  }
+}
+
+// ===== 主窗口图片工具（目录生成 / 弹窗缩略图共用） =====
+
+const RENDER_TARGET_LONG_EDGE = 1500; // 送 LLM 的图片长边像素
+const RENDER_CHUNK_SIZE = 8; // 每次渲染的页数（分块降低内存峰值）
+const RENDER_JPEG_QUALITY = 0.85;
+
+export function decodeImage(
+  win: Window,
+  base64: string,
+  mime: string,
+): Promise<any> {
+  return new Promise((resolve, reject) => {
+    // 主窗口 document 的 createElementNS 返回类型被 Zotero 的 XPCOM 声明
+    // 收窄为 nsISupports，这里统一按 HTML 元素操作
+    const img: any = win.document.createElementNS(
+      "http://www.w3.org/1999/xhtml",
+      "img",
+    );
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("图片解码失败"));
+    img.src = `data:${mime};base64,${base64}`;
+  });
+}
+
+/** 解码任意 base64 图片 → 缩放至长边上限 → JPEG base64 */
+export async function downscaleBase64Image(
+  win: Window,
+  base64: string,
+  mime: string,
+  longEdge: number,
+  quality: number,
+): Promise<string> {
+  const img: any = await decodeImage(win, base64, mime);
+  const maxDim = Math.max(img.naturalWidth, img.naturalHeight);
+  const scale = maxDim > longEdge ? longEdge / maxDim : 1;
+  const w = Math.max(1, Math.round(img.naturalWidth * scale));
+  const h = Math.max(1, Math.round(img.naturalHeight * scale));
+  const canvas: any = win.document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx: any = canvas.getContext("2d");
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, w, h);
+  ctx.drawImage(img, 0, 0, w, h);
+  return canvas.toDataURL("image/jpeg", quality).split(",")[1];
+}
+
+/** 分块渲染指定页为 JPEG（PNG 渲染 → 主窗口 canvas 缩放 → JPEG） */
+export async function renderPagesToJpegs(
+  filePath: string,
+  itemId: number,
+  pages: number[],
+  longEdge: number = RENDER_TARGET_LONG_EDGE,
+  renderScale?: number,
+): Promise<Map<number, string>> {
+  const out = new Map<number, string>();
+  const win = Zotero.getMainWindow();
+  if (!win) throw new Error("主窗口不可用");
+  for (const chunk of chunkArray(pages, RENDER_CHUNK_SIZE)) {
+    throwIfCancelled();
+    const imgs = await pdfToImages(
+      filePath,
+      undefined,
+      itemId,
+      chunk,
+      renderScale,
+    );
+    for (const img of imgs) {
+      out.set(
+        img.pageNumber,
+        await downscaleBase64Image(
+          win,
+          img.base64,
+          "image/png",
+          longEdge,
+          RENDER_JPEG_QUALITY,
+        ),
+      );
+    }
+  }
+  return out;
 }
 
 async function callAIVisionAPI(

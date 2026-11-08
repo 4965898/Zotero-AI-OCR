@@ -4,6 +4,7 @@ import {
   callAsyncAPI,
   callModelBestAPI,
   extractPagesToTempPdf,
+  getPdfPageCount,
   OCRPageResult,
   ENGINE_ADVANCED_FEATURES,
   ENGINE_MODELS,
@@ -14,6 +15,7 @@ import {
   isOcrCancelled,
 } from "./ocr-engine";
 import { handleBatchAnnotationsOCR } from "./annotation-ocr";
+import { handleTocGeneration } from "./toc-generator";
 import {
   getPref,
   setPref,
@@ -21,6 +23,7 @@ import {
   setAdvancedFeature,
   getCustomEngines,
 } from "../utils/prefs";
+import { parsePageRange } from "../utils/toc-algorithms";
 import { getString } from "../utils/locale";
 
 const ALL_ENGINES: { value: string; label: string }[] = [
@@ -55,6 +58,7 @@ function truncateName(name: string, maxLength: number = 40): string {
 
 /**
  * 向 Zotero 右键菜单注册菜单项（替代 toolkit 5.2.0 中已移除的 Menu.register）
+ * parent 缺省挂到 zotero-itemmenu 根弹出菜单；传入父元素则挂为子菜单项
  */
 function registerMenuItem(
   win: _ZoteroTypes.MainWindow,
@@ -63,9 +67,11 @@ function registerMenuItem(
   icon: string,
   commandListener: (() => void) | null,
   isMenu: boolean = false,
+  parent?: XUL.Element,
 ) {
   const doc = win.document;
-  const popup = doc.getElementById("zotero-itemmenu");
+  const popup =
+    parent || (doc.getElementById("zotero-itemmenu") as XUL.Element);
   if (!popup) {
     ztoolkit.log(`registerMenuItem: zotero-itemmenu not found for ${id}`);
     return;
@@ -84,7 +90,8 @@ function registerMenuItem(
   el.setAttribute("id", id);
   el.setAttribute("label", label);
   if (icon) {
-    el.setAttribute("class", "menuitem-iconic");
+    // XUL 里 <menu> 需要 menu-iconic 才会显示图标（menuitem-iconic 只对 menuitem 生效）
+    el.setAttribute("class", isMenu ? "menu-iconic" : "menuitem-iconic");
     el.style.listStyleImage = `url(${icon})`;
   }
   if (commandListener) {
@@ -97,8 +104,54 @@ function registerMenuItem(
   popup.appendChild(el);
 }
 
+/** 获取（或创建）根菜单的 menupopup */
+function getRootPopup(
+  win: _ZoteroTypes.MainWindow,
+  menuIcon: string,
+): XUL.Element | null {
+  const doc = win.document;
+  if (!doc) return null;
+  const rootMenu = doc.getElementById("zotero-itemmenu-aiocr-root");
+  if (rootMenu) {
+    const popup = rootMenu.querySelector("menupopup");
+    if (popup) return popup as XUL.Element;
+  }
+  registerMenuItem(
+    win,
+    "zotero-itemmenu-aiocr-root",
+    getString("menuitem-root"),
+    menuIcon,
+    null,
+    true,
+  );
+  const created = doc.getElementById("zotero-itemmenu-aiocr-root");
+  if (!created) return null;
+  return created.querySelector("menupopup") as XUL.Element;
+}
+
+/** 幂等地向弹出菜单追加带 id 的分隔线（重复注册时先移除旧的，避免累积） */
+function appendSeparator(popup: XUL.Element, id: string) {
+  const doc = popup.ownerDocument;
+  if (!doc) return;
+  const existing = doc.getElementById(id);
+  if (existing) existing.remove();
+  const sep = doc.createElementNS(
+    "http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul",
+    "menuseparator",
+  ) as XUL.Element;
+  sep.setAttribute("id", id);
+  popup.appendChild(sep);
+}
+
 export function registerContextMenu(win: _ZoteroTypes.MainWindow) {
   const menuIcon = `chrome://aiocr/content/icons/favicon@0.5x.png`;
+
+  // 所有功能收纳进「AI OCR」次级菜单，避免占用右键菜单版面
+  const rootPopup = getRootPopup(win, menuIcon);
+  if (!rootPopup) {
+    ztoolkit.log("registerContextMenu: failed to create root menu popup");
+    return;
+  }
 
   registerMenuItem(
     win,
@@ -106,6 +159,8 @@ export function registerContextMenu(win: _ZoteroTypes.MainWindow) {
     getString("menuitem-ocr"),
     menuIcon,
     () => handleSingleOCR(),
+    false,
+    rootPopup,
   );
   registerMenuItem(
     win,
@@ -113,6 +168,21 @@ export function registerContextMenu(win: _ZoteroTypes.MainWindow) {
     getString("menuitem-batch-ocr"),
     menuIcon,
     () => handleBatchOCR(),
+    false,
+    rootPopup,
+  );
+  registerMenuItem(
+    win,
+    "zotero-itemmenu-aiocr-annotation-batch",
+    getString("menuitem-annotation-batch-ocr"),
+    menuIcon,
+    () => {
+      handleBatchAnnotationsOCR().catch((err: any) => {
+        ztoolkit.log(`[AIOCR] Batch annotation OCR failed: ${err.message}`);
+      });
+    },
+    false,
+    rootPopup,
   );
   registerMenuItem(
     win,
@@ -120,7 +190,26 @@ export function registerContextMenu(win: _ZoteroTypes.MainWindow) {
     getString("menuitem-page-range-ocr"),
     menuIcon,
     () => handlePageRangeOCR(),
+    false,
+    rootPopup,
   );
+  registerMenuItem(
+    win,
+    "zotero-itemmenu-aiocr-toc-bookmark",
+    getString("menuitem-toc-bookmark"),
+    menuIcon,
+    () => {
+      handleTocGeneration().catch((err: any) => {
+        ztoolkit.log(`[AIOCR] TOC generation failed: ${err.message}`);
+      });
+    },
+    false,
+    rootPopup,
+  );
+
+  // 分隔线：操作类与状态/设置类分组
+  appendSeparator(rootPopup, "zotero-itemmenu-aiocr-sep-cancel");
+
   registerMenuItem(
     win,
     "zotero-itemmenu-aiocr-cancel",
@@ -138,18 +227,12 @@ export function registerContextMenu(win: _ZoteroTypes.MainWindow) {
         })
         .show();
     },
+    false,
+    rootPopup,
   );
-  registerMenuItem(
-    win,
-    "zotero-itemmenu-aiocr-annotation-batch",
-    getString("menuitem-annotation-batch-ocr"),
-    menuIcon,
-    () => {
-      handleBatchAnnotationsOCR().catch((err: any) => {
-        ztoolkit.log(`[AIOCR] Batch annotation OCR failed: ${err.message}`);
-      });
-    },
-  );
+  appendSeparator(rootPopup, "zotero-itemmenu-aiocr-sep-settings");
+
+  // 切换引擎 / 高级选项：由顶级降为第三级
   registerMenuItem(
     win,
     "zotero-itemmenu-aiocr-switch-engine",
@@ -157,6 +240,7 @@ export function registerContextMenu(win: _ZoteroTypes.MainWindow) {
     menuIcon,
     null,
     true,
+    rootPopup,
   );
   registerMenuItem(
     win,
@@ -165,6 +249,7 @@ export function registerContextMenu(win: _ZoteroTypes.MainWindow) {
     menuIcon,
     null,
     true,
+    rootPopup,
   );
 
   refreshEngineMenu();
@@ -445,17 +530,6 @@ function getSelectedPdfAttachments(): Zotero.Item[] {
 /** 单名创作者取 name，常规创作者取 lastName（Creator 联合类型的统一取值） */
 function creatorDisplayName(creator: any): string {
   return creator.lastName || creator.name || "";
-}
-
-async function getPdfPageCount(filePath: string): Promise<number> {
-  try {
-    const bytes = await IOUtils.read(filePath);
-    const text = new TextDecoder().decode(bytes);
-    const matches = text.match(/\/Type\s*\/Page[^s]/g);
-    return matches ? matches.length : 0;
-  } catch {
-    return 0;
-  }
 }
 
 function generateNoteTitle(
@@ -809,38 +883,6 @@ async function handleBatchOCR() {
     });
   }
   progressWin.startCloseTimer(5000);
-}
-
-function parsePageRange(input: string, maxPage: number): number[] {
-  const pages = new Set<number>();
-  const parts = input.split(",");
-
-  for (const part of parts) {
-    const trimmed = part.trim();
-    if (!trimmed) continue;
-
-    const rangeMatch = trimmed.match(/^(\d+)\s*-\s*(\d+)$/);
-    if (rangeMatch) {
-      const start = parseInt(rangeMatch[1], 10);
-      const end = parseInt(rangeMatch[2], 10);
-      if (start > 0 && end > 0 && start <= end) {
-        for (let i = start; i <= Math.min(end, maxPage); i++) {
-          pages.add(i);
-        }
-      }
-      continue;
-    }
-
-    const singleMatch = trimmed.match(/^(\d+)$/);
-    if (singleMatch) {
-      const pageNum = parseInt(singleMatch[1], 10);
-      if (pageNum > 0 && pageNum <= maxPage) {
-        pages.add(pageNum);
-      }
-    }
-  }
-
-  return Array.from(pages).sort((a, b) => a - b);
 }
 
 async function handlePageRangeOCR() {
